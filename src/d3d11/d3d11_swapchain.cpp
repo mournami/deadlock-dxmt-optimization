@@ -209,6 +209,7 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   SetFullscreenState(BOOL Fullscreen, IDXGIOutput *pTarget) final {
+    auto profile = ProfileEvent(FrameEvent::Fullscreen, !!Fullscreen);
     Com<IDXGIOutput1> target;
 
     if (pTarget) {
@@ -323,6 +324,7 @@ public:
   STDMETHODCALLTYPE
   ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format,
                 UINT flags) final {
+    auto profile = ProfileEvent(FrameEvent::ResizeBuffers, (uint64_t(Width) << 32) | Height);
     /* BufferCount ignored */
     if (Width == 0 || Height == 0) {
       wsi::getWindowSize(hWnd, &desc_.Width, &desc_.Height);
@@ -384,6 +386,8 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   ResizeTarget(const DXGI_MODE_DESC *pDesc) final {
+    auto profile = ProfileEvent(FrameEvent::ResizeTarget,
+        pDesc ? (uint64_t(pDesc->Width) << 32) | pDesc->Height : 0);
     if (!pDesc)
       return DXGI_ERROR_INVALID_CALL;
 
@@ -427,6 +431,7 @@ public:
   };
 
   void ApplyLayerProps() {
+    auto profile = ProfileEvent(FrameEvent::ApplyLayer);
     auto target_color_space =
         ConvertColorSpace(desc_.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
                               ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
@@ -569,6 +574,7 @@ public:
   };
 
   SyncFrameState SyncFrame(uint64_t current_frame_id) {
+    auto profile = ProfileEvent(FrameEvent::SyncFrame, current_frame_id);
     if (frame_latency_fence_) {
       if (current_frame_id > frame_latency)
         frame_latency_fence_->wait(current_frame_id - frame_latency);
@@ -581,11 +587,28 @@ public:
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags,
            const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
+    auto &cmd_queue = device_->GetDXMTDevice().queue();
+    auto events = cmd_queue.EventProfiler();
+    const auto frame = cmd_queue.EventFrame();
+    const auto thread = events ? GetCurrentThreadId() : 0;
+    const auto object = reinterpret_cast<uintptr_t>(this);
+    FrameEventScope present_profile(events, FrameEvent::Present, frame, thread, PresentFlags, object);
     HRESULT hr = S_OK;
     if (desc_.Width == 0 || desc_.Height == 0)
       hr = DXGI_STATUS_OCCLUDED;
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr;
+
+    if (events) {
+      // Sample Wine's window state only; do not install hooks, capture keyboard
+      // input, change focus or inspect the other foreground application's name.
+      FrameEventScope window(events, FrameEvent::WindowState, frame, thread, 0, object);
+      const auto foreground = GetForegroundWindow();
+      const auto root = GetAncestor(hWnd, GA_ROOT);
+      window.setDetail(
+          (foreground && foreground == (root ? root : hWnd) ? 1u : 0u) |
+          (IsIconic(hWnd) ? 2u : 0u) | (IsWindowVisible(hWnd) ? 4u : 0u));
+    }
 
     double vsync_duration =
         std::max(SyncInterval * 1.0 /
@@ -593,10 +616,16 @@ public:
                                                : init_refresh_rate_),
                  preferred_max_frame_rate ? 1.0 / preferred_max_frame_rate : 0);
 
-    std::unique_lock<d3d11_device_mutex> lock(device_->mutex);
+    std::unique_lock<d3d11_device_mutex> lock(device_->mutex, std::defer_lock);
+    {
+      FrameEventScope mutex_profile(events, FrameEvent::PresentMutex, frame, thread, 0, object);
+      lock.lock();
+    }
 
-    device_context_->PrepareFlush();
-    auto &cmd_queue = device_->GetDXMTDevice().queue();
+    {
+      FrameEventScope flush_profile(events, FrameEvent::PrepareFlush, frame, thread, 0, object);
+      device_context_->PrepareFlush();
+    }
     if (auto profile = cmd_queue.FrameProfiler()) {
       const auto workers = device_->GetShaderCompileStats();
       profile->set(FrameCounter::ShaderWorkers, workers[0]);
@@ -635,11 +664,17 @@ public:
         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
       });
     }
-    device_context_->Commit();
+    {
+      FrameEventScope commit_profile(events, FrameEvent::Commit, frame, thread, 0, object);
+      device_context_->Commit();
+    }
 
     lock.unlock(); // since PresentBoundary() will and should only stall current thread
 
-    cmd_queue.PresentBoundary();
+    {
+      FrameEventScope boundary_profile(events, FrameEvent::PresentBoundary, frame, thread, 0, object);
+      cmd_queue.PresentBoundary();
+    }
 
     presentation_count_ += 1;
 
@@ -859,6 +894,13 @@ public:
   }
 
 private:
+  FrameEventScope ProfileEvent(FrameEvent event, uint64_t detail = 0) {
+    auto &queue = device_->GetDXMTDevice().queue();
+    auto events = queue.EventProfiler();
+    return FrameEventScope(events, event, queue.EventFrame(),
+                           events ? GetCurrentThreadId() : 0, detail, reinterpret_cast<uintptr_t>(this));
+  }
+
   bool LayerSupportEDR() {
     WMTEDRValue edr_value;
     MetalLayer_getEDRValue(layer_weak_, &edr_value);

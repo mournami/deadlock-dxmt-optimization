@@ -550,6 +550,9 @@ public:
 
   virtual void
   WaitUntilGPUIdle() override {
+    auto events = cmd_queue.EventProfiler();
+    FrameEventScope scope(events, FrameEvent::WaitGPUIdle, cmd_queue.EventFrame(),
+                          events ? GetCurrentThreadId() : 0);
     uint64_t seq = cmd_queue.CurrentSeqId();
     if(!InvalidateCurrentPass())
       Commit();

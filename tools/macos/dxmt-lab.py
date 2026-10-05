@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -690,6 +691,53 @@ def shader_workers_probe() -> None:
         if result.returncode or "shader_workers_passed" not in output:
             raise RuntimeError(f"Shader worker scheduler check failed ({result.returncode}); inspect {log}")
         print("Shader worker scheduler check passed", flush=True)
+    finally:
+        stop_bottle(BOTTLE)
+
+
+def presentation_probe() -> None:
+    private_runtime()
+    assert_probe_stopped()
+    prefix = private_prefix(BOTTLE)
+    expected = staged_hashes()
+    route_runtime_dxmt()
+    configure_dxmt(BOTTLE)
+    executable = LAB / "presentation-probe.exe"
+    if not executable.is_file() or not executable.resolve().is_relative_to(LAB.resolve()):
+        raise RuntimeError("The private presentation-probe.exe is missing")
+    if (prefix / "dosdevices/z:").resolve() != Path("/"):
+        raise RuntimeError("The private probe bottle has no Z: mapping")
+    report = LAB / "probe-logs" / ("presentation-" + str(time.time_ns()))
+    report.mkdir(parents=True, mode=0o700)
+    env = environment()
+    env["DXMT_FRAME_REPORT_DIR"] = "Z:" + report.as_posix()
+    try:
+        result = subprocess.run([
+            str(RUNTIME / "bin/wine"), "--bottle", BOTTLE, "--no-gui", "--no-update",
+            "--dll", "dxgi,d3d11,winemetal=b", "--debugmsg", "-all,+loaddll",
+            "--cx-app", "Z:" + executable.as_posix(),
+        ], env=env, capture_output=True, text=True, timeout=45)
+        output = result.stdout + result.stderr
+        (report / "probe.log").write_text(output)
+        verify_loaded_dxmt(output, prefix, ("d3d11.dll", "dxgi.dll", "winemetal.dll"))
+        if result.returncode or "presentation_probe_passed" not in output:
+            raise RuntimeError(f"Present/resize probe failed ({result.returncode}); inspect {report}")
+        files = list(report.glob("*.events.csv"))
+        if len(files) != 1:
+            raise RuntimeError(f"Expected one event timeline; inspect {report}")
+        lines = files[0].read_text().splitlines()
+        # Queue contention may drop optional diagnostic records. Require actual
+        # phases from the real DLL, not an exact count or timing threshold.
+        rows = list(csv.DictReader(line for line in lines if not line.startswith("#")))
+        required = {"present", "present_mutex", "present_boundary", "sync_frame",
+                    "window_state", "resize_buffers", "wait_gpu_idle", "wait_cpu_fence"}
+        if not required.issubset({row["event"] for row in rows}):
+            raise RuntimeError(f"Present probe did not record required phases; inspect {report}")
+        if not any(line.startswith("# dropped_samples=") for line in lines):
+            raise RuntimeError(f"Presentation timeline did not close cleanly; inspect {report}")
+        if staged_hashes() != expected:
+            raise RuntimeError("Selected DXMT changed during presentation probe")
+        print("Present/resize and event timeline check passed:", report, flush=True)
     finally:
         stop_bottle(BOTTLE)
 

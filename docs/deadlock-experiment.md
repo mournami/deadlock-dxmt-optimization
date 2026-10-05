@@ -15,12 +15,13 @@ export DXMT_LAB_DIR=/path/to/prepared/lab
 export DXMT_GAME_EXE=/path/to/Deadlock/game/bin/win64/deadlock.exe
 # Optional when Xcode is installed elsewhere:
 export DXMT_DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer
-python3 tools/macos/dxmt-build.py build --variant baseline --publish
 python3 tools/macos/dxmt-build.py build --variant experiment --publish
 python3 tools/macos/dxmt-crossover.py install
 ```
 
 Compile `tests/device_probe.c` and `tests/om_state_probe.c` with the prepared x86_64 LLVM-MinGW compiler as `device-probe.exe` and `om-state-probe.exe` in the lab. The menu uses the last validated **local** build; it does not silently merge upstream, download arbitrary binaries or run scheduled game sessions.
+
+Routine baseline development is paused. Keep its existing ready snapshot as a historical rollback tool; use the installed CrossOver DXMT in the ordinary Steam bottle as the practical control. The pinned fork and installed version differ, so a comparison must identify both actual builds.
 
 ## Exact change
 
@@ -43,6 +44,20 @@ CPU CSV now adds OM call/repeat/recorded-command counts, display-setting changes
 The companion `*.encoder.csv` records frame ID, time inside `nextDrawable` and the complete presentation encode call. These are encoding-thread wall times, not GPU completion times, display FPS or input latency. CPU and encoder use separate bounded SPSC queues feeding one writer; full queues drop diagnostics instead of waiting for disk. The owner joins both producers before reporter shutdown. The analysis helper supports old/new CPU schemas and joins encoder measurements by frame ID.
 
 The analyzer also lists the ten longest CPU intervals with their CPU timings and any encoder samples bearing the same frame ID. Those two kinds of timing are displayed separately; they cannot safely be added as a causal breakdown. It does not infer an Alt+Tab event or classify loading as gameplay. Recorded elapsed time omits any lost intervals. For a forcibly stopped capture, `--allow-incomplete` discards an unterminated final line and reports that omission; malformed complete rows still fail validation.
+
+### CPU/DXGI event timeline (experiment)
+
+The new `*.events.csv` companion measures whole Present calls (including TEST calls), device-mutex acquisition, PrepareFlush, Commit, PresentBoundary, the swapchain's separate SyncFrame fence, ResizeBuffers/ResizeTarget, SetFullscreenState, layer-property application and WaitUntilGPUIdle/WaitCPUFence. Synchronization, ordering and rendering work remain unchanged. This is diagnostic coverage, not a new FPS optimization.
+
+Events carry monotonic start/duration, caller thread, swapchain identity and a nearby CPU interval label. The return-ordered file may contain nested or overlapping calls; the analyzer sorts by entry time and never adds their durations. An atomic interval label avoids reading the CPU-owned frame counter from concurrent DXGI callers. Object identities distinguish multiple swapchains and are private process-local values.
+
+For normal Present calls, foreground/minimized/visible state is sampled through Wine's window APIs. The query itself is timed. No input hook, keyboard capture, focus change or enumeration of other apps is installed. State bits are foreground=1, minimized=2, visible=4. Sampling can miss short focus changes or detect them only after a long gap; it is not an exact Alt+Tab timestamp. Resize details pack requested width/height into the high/low 32 bits; Present detail is the original flags, SyncFrame/WaitCPUFence detail is the requested sequence.
+
+The event queue is bounded to 512 records and accepts multiple callers using one nonblocking try-lock. Contention/full capacity drops diagnostic records and increments its footer counter. It never spins or waits for space/disk. The same background writer drains CPU, encoder and event queues. There is no extra timing clock read, window query or event submission without `DXMT_FRAME_REPORT_DIR`.
+
+Compile `tests/presentation_probe.c` with the prepared x86_64 LLVM-MinGW C compiler using `-O2 -static -luuid -luser32` as `presentation-probe.exe` in the lab. Publishing an experiment with DXGI events additionally runs this probe: it opens a tiny non-activating test window in the empty private bottle, presents 16 frames, exercises the frame-latency waitable object and resizes once. The helper checks real event phases and a clean timeline footer. Failure preserves the previous ready pointer. This checks integration, not Deadlock performance or the user's Alt+Tab symptom.
+
+The analyzer reports longest calls, gaps between returned Present and the next entry on the same thread/swapchain, sampled window transitions and events near the longest CPU intervals. A gap can contain other DXMT calls, engine work or intentional pacing; missing records can inflate it. Neither a gap nor a nearby focus snapshot establishes a cause. The entire Present and nested call timings let the next capture distinguish the previously unmeasured waits from time between Present calls. CPU shader creation, the engine, Wine input handling and GPU execution remain incompletely covered.
 
 ## Shader compilation CPU budget experiment
 

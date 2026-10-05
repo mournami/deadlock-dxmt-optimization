@@ -72,6 +72,9 @@ def promote(variant: str) -> None:
         worker_tested = "shader_worker_default" in manifest
         if worker_tested:
             lab.shader_workers_probe()
+        presentation_tested = bool(manifest.get("dxgi_events"))
+        if presentation_tested:
+            lab.presentation_probe()
         # The previous ready pointer survives every failure above.
         atomic_json(lab.LAB / ("ready-" + variant + ".json"), {
             "variant": variant, "install": str(snapshot), "sha256": hashes,
@@ -80,6 +83,7 @@ def promote(variant: str) -> None:
             "validated_at": datetime.now().isoformat(), "validation": "dll-and-gpu-readback",
             "om_state_tested": state_tested,
             "shader_worker_tested": worker_tested,
+            "presentation_tested": presentation_tested,
         })
         print("Ready build published:", variant, identity)
 

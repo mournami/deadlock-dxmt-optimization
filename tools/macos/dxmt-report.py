@@ -17,6 +17,10 @@ DIAGNOSTIC_FIELDS = ("om_blend_calls", "om_blend_redundant", "om_depth_calls", "
     "om_blend_commands", "om_depth_commands", "layer_query_ns", "layer_wait_ns",
     "present_pipeline_build_ns", "layer_update_ns", "display_changes", "present_pipeline_builds")
 SCHEDULER_FIELDS = ("shader_workers", "shader_workers_active", "shader_jobs_queued", "shader_worker_limit")
+EVENT_FIELDS = ("event", "frame", "start_ns", "duration_ns", "thread_id", "object_id", "detail")
+EVENT_KINDS = {"present", "present_mutex", "prepare_flush", "commit", "present_boundary", "sync_frame",
+               "window_state", "resize_buffers", "resize_target", "fullscreen", "apply_layer",
+               "wait_gpu_idle", "wait_cpu_fence"}
 
 
 def report_lines(path: Path, allow_incomplete: bool) -> tuple[list[str], bool]:
@@ -139,6 +143,14 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         selected = result["encoder_diagnostics"].pop("selected_frame_samples")
         for interval in result["longest_intervals"]:
             interval["encoder_same_frame"] = selected.get(str(interval["frame"]), [])
+    events = path.with_name(path.stem + ".events.csv")
+    if events.is_file():
+        result["dxgi_events"] = summarize_events(
+            events, rows[0]["frame"], rows[-1]["frame"], allow_incomplete,
+            selected_frames={row["frame"] for row in worst})
+        selected = result["dxgi_events"].pop("selected_frame_events")
+        for interval in result["longest_intervals"]:
+            interval["events_near_cpu_frame"] = selected.get(str(interval["frame"]), [])
     return result
 
 
@@ -178,6 +190,92 @@ def summarize_encoder(path: Path, first_frame: int, last_frame: int, allow_incom
                    for key in columns[1:]} if samples else {},
         "max_ms": {key.removesuffix("_ns"): round(max(s[key] for s in samples) / 1e6, 4)
                    for key in columns[1:]} if samples else {},
+    }
+
+
+def summarize_events(path: Path, first_frame: int, last_frame: int, allow_incomplete: bool,
+                     selected_frames: set[int] | None = None) -> dict:
+    lines, ignored_tail = report_lines(path, allow_incomplete)
+    dropped = next((int(line.split("=", 1)[1]) for line in lines if line.startswith("# dropped_samples=")), None)
+    if dropped is not None and dropped < 0:
+        raise ValueError("Negative event dropped sample count")
+    reader = csv.DictReader(io.StringIO("\n".join(line for line in lines if not line.startswith("#"))))
+    if tuple(reader.fieldnames or ()) != EVENT_FIELDS:
+        raise ValueError("Unsupported event report header")
+    samples = []
+    for row in reader:
+        if None in row or any(row.get(key) is None for key in EVENT_FIELDS):
+            raise ValueError("Malformed event report row")
+        if row["event"] not in EVENT_KINDS:
+            raise ValueError("Unknown event kind")
+        sample = {"event": row["event"], **{key: int(row[key]) for key in EVENT_FIELDS[1:]}}
+        if any(sample[key] < 0 for key in EVENT_FIELDS[1:]):
+            raise ValueError("Negative event report value")
+        if first_frame <= sample["frame"] <= last_frame:
+            samples.append(sample)
+    if (dropped is None or dropped > 0) and not allow_incomplete:
+        raise ValueError("Event report is incomplete or lost samples")
+    # Nested events are submitted on return; the file is not start-time ordered.
+    samples.sort(key=lambda sample: sample["start_ns"])
+    origin = samples[0]["start_ns"] if samples else 0
+
+    def compact(sample: dict) -> dict:
+        return {"event": sample["event"], "frame": sample["frame"],
+                "start_seconds": round((sample["start_ns"] - origin) / 1e9, 6),
+                "duration_ms": round(sample["duration_ns"] / 1e6, 4),
+                "thread_id": sample["thread_id"], "object_id": sample["object_id"],
+                "detail": sample["detail"]}
+
+    selected = {}
+    for frame in selected_frames or ():
+        nearby = [sample for sample in samples if abs(sample["frame"] - frame) <= 1]
+        selected[str(frame)] = [compact(sample) for sample in nearby[:80]]
+    durations = {kind: [sample["duration_ns"] / 1e6 for sample in samples if sample["event"] == kind]
+                 for kind in sorted(EVENT_KINDS)}
+    # Gaps are per caller thread AND swapchain, never between unrelated objects.
+    # They can include other DXMT calls/engine work/intentional pacing, and a
+    # missing event can inflate a gap. Do not label them "time outside DXMT".
+    previous = {}
+    gaps = []
+    for sample in samples:
+        if sample["event"] != "present" or sample["detail"] & 1:  # DXGI_PRESENT_TEST
+            continue
+        key = (sample["thread_id"], sample["object_id"])
+        prior = previous.get(key)
+        if prior is not None:
+            gap = sample["start_ns"] - (prior["start_ns"] + prior["duration_ns"])
+            gaps.append({"previous_frame": prior["frame"], "frame": sample["frame"],
+                         "thread_id": key[0], "object_id": key[1],
+                         "gap_ms": round(max(0, gap) / 1e6, 4),
+                         "overlap": gap < 0})
+        previous[key] = sample
+
+    window_states = {}
+    transitions = []
+    for sample in samples:
+        if sample["event"] != "window_state":
+            continue
+        key = sample["object_id"]
+        state = sample["detail"]
+        if window_states.get(key) != state:
+            transitions.append({**compact(sample), "initial_sample": key not in window_states,
+                                "foreground": bool(state & 1), "minimized": bool(state & 2),
+                                "visible": bool(state & 4)})
+            window_states[key] = state
+    return {
+        "file": str(path), "samples": len(samples), "dropped_samples": dropped,
+        "clean_shutdown": dropped is not None, "ignored_unterminated_tail": ignored_tail,
+        "scope": "CPU call wall times; nested/overlapping durations must not be added. Frame IDs are nearby CPU interval labels.",
+        "timeline_origin_ns": origin,
+        "calls": {kind: {"count": len(values), "mean_ms": round(statistics.mean(values), 4),
+                         "max_ms": round(max(values), 4)} for kind, values in durations.items() if values},
+        "longest_calls": [compact(sample) for sample in heapq.nlargest(
+            10, samples, key=lambda sample: sample["duration_ns"])],
+        "longest_present_gaps": heapq.nlargest(10, gaps, key=lambda gap: gap["gap_ms"]),
+        "present_gaps_note": "Between returned Present and next entry on the same thread/swapchain; may include other DXMT work or intentional pacing. Missing events inflate gaps.",
+        "sampled_window_transitions": transitions[:100], "omitted_window_transitions": max(0, len(transitions) - 100),
+        "window_note": "Foreground/minimized/visible sampled at Present only; a transition may be detected late or missed between calls. No exact Alt+Tab timestamp.",
+        "selected_frame_events": selected,
     }
 
 

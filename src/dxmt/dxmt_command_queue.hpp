@@ -181,6 +181,7 @@ private:
   CaptureState capture_state;
   std::unique_ptr<FrameReport<dxmt::thread>> frame_report_;
   FrameCounters frame_counters_;
+  std::atomic<uint64_t> report_frame_{0};
 
 public:
   InternalCommandLibrary cmd_library;
@@ -247,6 +248,9 @@ public:
 
   bool FrameReportEnabled() const { return frame_report_ != nullptr; }
   FrameCounters *FrameProfiler() { return frame_report_ ? &frame_counters_ : nullptr; }
+  FrameEventRecorder *EventProfiler() { return frame_report_ ? frame_report_->eventRecorder() : nullptr; }
+  // A nearby CPU interval label for concurrent DXGI calls, not a GPU frame ID.
+  uint64_t EventFrame() const { return report_frame_.load(std::memory_order_relaxed); }
 
   void RecordFrameCounter(FrameCounter counter, uint64_t value = 1) {
     if (unlikely(frame_report_ != nullptr)) frame_counters_.add(counter, value);
@@ -276,6 +280,7 @@ public:
     statistics.compute(frame_count);
 #endif
     frame_count++;
+    if (frame_report_) report_frame_.store(frame_count, std::memory_order_relaxed);
     statistics.at(frame_count).reset();
     // After present N-th frame (N starts from 1), wait for (N - max_latency)-th frame to finish rendering 
     if (likely(frame_count > max_latency_)) {
@@ -297,6 +302,9 @@ public:
 
   void
   WaitCPUFence(uint64_t seq) {
+    auto events = EventProfiler();
+    FrameEventScope scope(events, FrameEvent::WaitCPUFence, EventFrame(),
+                          events ? GetCurrentThreadId() : 0, seq);
     cpu_coherent.wait(seq);
   };
 

@@ -72,6 +72,18 @@ class ReadyBuilds(unittest.TestCase):
         (self.install / lab.FILES[0]).write_bytes(b"next-build")
         self.assertEqual(runner.selected_build("experiment", True), selected)
 
+    def test_presentation_failure_keeps_previous_ready_pointer(self):
+        self.manifest["dxgi_events"] = True
+        (self.root / "build-experiment-manifest.json").write_text(json.dumps(self.manifest))
+        pointer = self.root / "ready-experiment.json"
+        pointer.write_text('{"previous":"keep"}')
+        with patch.object(lab, "stage"), patch.object(lab, "probe"), patch.object(lab, "device_probe"), \
+             patch.object(lab, "presentation_probe", side_effect=RuntimeError("Present failed")) as present:
+            with self.assertRaisesRegex(RuntimeError, "Present failed"):
+                menu.promote("experiment")
+            present.assert_called_once()
+        self.assertEqual(pointer.read_text(), '{"previous":"keep"}')
+
     def test_check_entry_cannot_launch_wine_or_game(self):
         with patch.object(lab, "private_runtime"), patch.object(runner, "check_prefix"), \
              patch.object(runner, "selected_build"), patch.object(menu.subprocess, "run") as process, \

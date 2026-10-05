@@ -132,6 +132,7 @@ def run(variant: str, require_ready: bool = False) -> None:
             "source_files_sha256": build_record.get("source_files_sha256", {}),
             "loaded_dxmt_sha256": lab.staged_hashes(), "om_state_dedup": variant == "experiment",
             "shader_workers_requested": 4 if variant == "experiment" else 0,
+            "dxgi_events": bool(build_record.get("presentation_tested")),
             "metric": "CPU/encoder wall time; not display FPS or input latency",
         }, indent=2) + "\n")
         if (PREFIX / "dosdevices/z:").resolve() != Path("/"):

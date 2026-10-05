@@ -1,5 +1,7 @@
 #pragma once
 
+#include "dxmt_frame_events.hpp"
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -99,8 +101,10 @@ template <typename Thread = std::thread> class FrameReport {
   FrameReportQueue<EncoderReportSample, 512> encoder_queue_;
   std::ofstream file_;
   std::ofstream encoder_file_;
+  std::ofstream event_file_;
   std::atomic<bool> stopping_{false};
   std::atomic<uint64_t> wake_{0};
+  FrameEventRecorder events_{&wake_};
   std::atomic<uint64_t> dropped_{0};
   std::atomic<uint64_t> encoder_dropped_{0};
   std::chrono::steady_clock::time_point previous_{};
@@ -129,6 +133,13 @@ template <typename Thread = std::thread> class FrameReport {
       encoder_file_ << encoder.frame << ',' << encoder.next_drawable_ns << ',' << encoder.present_encode_ns << ',' << encoder.pipeline_wait_ns << '\n';
       if (++rows % 256 == 0) encoder_file_.flush();
     }
+    FrameEventSample event;
+    for (size_t i = 0; i < 512 && events_.pop(event); ++i) {
+      event_file_ << kFrameEventNames[size_t(event.event)] << ',' << event.frame << ','
+                  << event.start_ns << ',' << event.duration_ns << ','
+                  << event.thread_id << ',' << event.object_id << ',' << event.detail << '\n';
+      if (++rows % 256 == 0) event_file_.flush();
+    }
   }
 
   void run() {
@@ -145,6 +156,10 @@ template <typename Thread = std::thread> class FrameReport {
         if (encoder_file_) {
           encoder_file_ << "# dropped_samples=" << encoder_dropped_.load(std::memory_order_relaxed) << '\n';
           encoder_file_.flush();
+        }
+        if (event_file_) {
+          event_file_ << "# dropped_samples=" << events_.dropped() << '\n';
+          event_file_.flush();
         }
         return;
       }
@@ -165,6 +180,11 @@ public:
       encoder_file_ << "frame,next_drawable_ns,present_encode_ns,pipeline_wait_ns\n";
       encoder_enabled_ = true;
     }
+    event_file_.open(path.parent_path() / (path.stem().string() + ".events.csv"));
+    if (event_file_) {
+      event_file_.imbue(std::locale::classic());
+      event_file_ << "event,frame,start_ns,duration_ns,thread_id,object_id,detail\n";
+    }
     writer_ = Thread([this]() { run(); });
     enabled_ = true;
   }
@@ -175,6 +195,7 @@ public:
   ~FrameReport() { stop(); }
 
   bool enabled() const { return enabled_; }
+  FrameEventRecorder *eventRecorder() { return event_file_.is_open() ? &events_ : nullptr; }
 
   // Called only by the encoding thread. No file IO or allocation here.
   void submitEncoder(EncoderReportSample sample) {

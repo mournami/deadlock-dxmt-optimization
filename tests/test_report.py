@@ -15,6 +15,7 @@ class PauseAnalysis(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.cpu = self.root / "game.csv"
         self.encoder = self.root / "game.encoder.csv"
+        self.events = self.root / "game.events.csv"
 
     def tearDown(self):
         self.temp.cleanup()
@@ -110,5 +111,76 @@ class PauseAnalysis(unittest.TestCase):
         worst=result["longest_intervals"][0]
         self.assertEqual(worst["shader_scheduler_snapshot"]["shader_jobs_queued"],8)
         self.assertEqual(worst["encoder_same_frame"][0]["pipeline_wait"],3000)
+
+    def write_events(self, rows, footer=True):
+        with self.events.open("w") as out:
+            writer = csv.writer(out)
+            writer.writerow(report.EVENT_FIELDS)
+            writer.writerows(rows)
+            if footer:
+                out.write("# dropped_samples=0\n")
+
+    def test_event_timeline_separates_nested_calls_from_inter_call_gaps(self):
+        self.write_cpu(pause=True)
+        # Return order differs from entry order. The 2s mutex is nested inside
+        # Present and must not be added again to Present's duration.
+        self.write_events([
+            ("present_mutex", 139, 1100000000, 2000000000, 1, 10, 0),
+            ("window_state", 139, 1000000000, 10, 1, 10, 5),
+            ("present", 139, 1000000000, 2100000000, 1, 10, 0),
+            ("present", 139, 4000000000, 1, 2, 20, 0),
+            ("present", 140, 9000000000, 1000000, 1, 10, 0),
+            ("window_state", 140, 9000000001, 10, 1, 10, 4),
+        ])
+        result = report.summarize(self.cpu, skip_seconds=0)
+        dxgi = result["dxgi_events"]
+        self.assertEqual(dxgi["calls"]["present_mutex"]["max_ms"], 2000)
+        self.assertEqual(dxgi["longest_calls"][0]["duration_ms"], 2100)
+        gap = dxgi["longest_present_gaps"][0]
+        self.assertEqual(gap["gap_ms"], 5900)
+        self.assertEqual((gap["thread_id"], gap["object_id"]), (1, 10))
+        self.assertEqual(len(dxgi["longest_present_gaps"]), 1)
+        transitions = dxgi["sampled_window_transitions"]
+        self.assertTrue(transitions[0]["initial_sample"])
+        self.assertTrue(transitions[0]["foreground"])
+        self.assertFalse(transitions[1]["foreground"])
+        self.assertFalse(transitions[1]["initial_sample"])
+        near = result["longest_intervals"][0]["events_near_cpu_frame"]
+        self.assertEqual(len(near), 6)
+        self.assertEqual(near[0]["start_seconds"], 0)
+        self.assertNotIn("cause", dxgi)
+
+    def test_event_partial_tail_losses_and_bad_rows(self):
+        self.write_events([("present", 1, 100, 200, 3, 4, 0)], footer=False)
+        with self.events.open("a") as out:
+            out.write("present,2,10")
+        with self.assertRaises(ValueError):
+            report.summarize_events(self.events, 0, 10, False)
+        result = report.summarize_events(self.events, 0, 10, True)
+        self.assertEqual(result["samples"], 1)
+        self.assertTrue(result["ignored_unterminated_tail"])
+        self.assertFalse(result["clean_shutdown"])
+        self.write_events([("present", 1, 100, -2, 3, 4, 0)])
+        with self.assertRaisesRegex(ValueError, "Negative event"):
+            report.summarize_events(self.events, 0, 10, True)
+        self.write_events([("unknown_event", 1, 100, 2, 3, 4, 0)])
+        with self.assertRaisesRegex(ValueError, "Unknown event"):
+            report.summarize_events(self.events, 0, 10, True)
+        self.write_events([("present", 1, 100)], footer=False)
+        with self.assertRaisesRegex(ValueError, "Malformed event"):
+            report.summarize_events(self.events, 0, 10, True)
+
+    def test_test_presents_and_unrelated_swapchains_do_not_create_gaps(self):
+        self.write_events([
+            ("present", 1, 100, 10, 1, 10, 0),
+            ("present", 1, 200, 10, 1, 10, 1),
+            ("present", 2, 300, 10, 1, 20, 0),
+            ("present", 3, 400, 10, 1, 10, 0),
+        ])
+        result = report.summarize_events(self.events, 0, 10, False)
+        self.assertEqual(len(result["longest_present_gaps"]), 1)
+        self.assertEqual(result["longest_present_gaps"][0]["previous_frame"], 1)
+        self.assertEqual(result["longest_present_gaps"][0]["frame"], 3)
+        self.assertEqual(result["longest_present_gaps"][0]["gap_ms"], .0003)
 
 if __name__ == "__main__": unittest.main()
