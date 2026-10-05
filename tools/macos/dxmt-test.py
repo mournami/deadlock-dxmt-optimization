@@ -125,6 +125,14 @@ def run(variant: str, require_ready: bool = False) -> None:
         lab.configure_dxmt(TEST_BOTTLE)
         report_dir = lab.LAB / "reports" / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + variant)
         report_dir.mkdir(parents=True, mode=0o700)
+        ready = lab.LAB / ("ready-" + variant + ".json")
+        build_record = json.loads(ready.read_text()) if ready.is_file() else {}
+        (report_dir / "session.json").write_text(json.dumps({
+            "variant": variant, "source_commit": build_record.get("source_commit"),
+            "source_files_sha256": build_record.get("source_files_sha256", {}),
+            "loaded_dxmt_sha256": lab.staged_hashes(), "om_state_dedup": variant == "experiment",
+            "metric": "CPU/encoder wall time; not display FPS or input latency",
+        }, indent=2) + "\n")
         if (PREFIX / "dosdevices/z:").resolve() != Path("/"):
             raise RuntimeError("The test bottle has no Z: mapping to the Mac filesystem")
         wine_report = "Z:" + str(report_dir)
