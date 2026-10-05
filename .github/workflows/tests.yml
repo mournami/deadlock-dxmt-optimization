@@ -1,0 +1,27 @@
+name: Telemetry and tooling tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  standalone-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check lab and reporting tools
+        run: python3 -m unittest discover -s tests -p 'test_tools.py' -v
+      - name: Check reporter queue and CSV with sanitizers
+        run: |
+          mkdir -p "$RUNNER_TEMP/frame-report-output"
+          c++ -std=c++20 -O1 -g -pthread -fsanitize=address,undefined -fno-omit-frame-pointer -I src/dxmt tests/frame_report_test.cpp -o "$RUNNER_TEMP/frame-report-test"
+          "$RUNNER_TEMP/frame-report-test" "$RUNNER_TEMP/frame-report-output"
