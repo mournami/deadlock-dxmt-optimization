@@ -42,6 +42,8 @@ CPU CSV now adds OM call/repeat/recorded-command counts, display-setting changes
 
 The companion `*.encoder.csv` records frame ID, time inside `nextDrawable` and the complete presentation encode call. These are encoding-thread wall times, not GPU completion times, display FPS or input latency. CPU and encoder use separate bounded SPSC queues feeding one writer; full queues drop diagnostics instead of waiting for disk. The owner joins both producers before reporter shutdown. The analysis helper supports old/new CPU schemas and joins encoder measurements by frame ID.
 
+The analyzer also lists the ten longest CPU intervals with their CPU timings and any encoder samples bearing the same frame ID. Those two kinds of timing are displayed separately; they cannot safely be added as a causal breakdown. It does not infer an Alt+Tab event or classify loading as gameplay. Recorded elapsed time omits any lost intervals. For a forcibly stopped capture, `--allow-incomplete` discards an unterminated final line and reports that omission; malformed complete rows still fail validation.
+
 ## Validation and comparison
 
 The offscreen GPU test verifies repeated state followed by draws, changed blend factors, sample masks and stencil references, NULL/default objects, exact state getter bits, new encoders after readback, ClearState and deferred command-list execution with both restore modes. It compares actual output pixels, not only successful API return codes. This is a correctness check, not a game performance benchmark.

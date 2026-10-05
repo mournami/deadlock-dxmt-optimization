@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import heapq
 import io
 import json
 import math
@@ -17,6 +18,17 @@ DIAGNOSTIC_FIELDS = ("om_blend_calls", "om_blend_redundant", "om_depth_calls", "
     "present_pipeline_build_ns", "layer_update_ns", "display_changes", "present_pipeline_builds")
 
 
+def report_lines(path: Path, allow_incomplete: bool) -> tuple[list[str], bool]:
+    raw = path.read_text()
+    lines = raw.splitlines()
+    # A killed writer can leave half a row (or a partially written integer).
+    # Discard only the unterminated tail, only when partial analysis was chosen.
+    ignored_tail = bool(raw and not raw.endswith(("\n", "\r")) and allow_incomplete)
+    if ignored_tail:
+        lines = lines[:-1]
+    return lines, ignored_tail
+
+
 def percentile(values: list[float], fraction: float) -> float:
     ordered = sorted(values)
     index = fraction * (len(ordered) - 1)
@@ -27,7 +39,7 @@ def percentile(values: list[float], fraction: float) -> float:
 
 def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = False,
               duration_seconds: float | None = None) -> dict:
-    lines = path.read_text().splitlines()
+    lines, ignored_tail = report_lines(path, allow_incomplete)
     dropped = next((int(line.split("=", 1)[1]) for line in lines if line.startswith("# dropped_samples=")), None)
     if dropped is not None and dropped < 0:
         raise ValueError("Negative dropped sample count")
@@ -40,6 +52,8 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
     elapsed_ns = 0
     gaps = 0
     for row in reader:
+        if None in row or any(row.get(key) is None for key in columns):
+            raise ValueError("Malformed frame report row")
         sample = {key: int(row[key]) for key in columns}
         if any(value < 0 for value in sample.values()):
             raise ValueError("Negative report value")
@@ -53,6 +67,7 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         previous = frame
         interval = sample["boundary_interval_ns"]
         elapsed_ns += interval
+        sample["recorded_elapsed_ns"] = elapsed_ns
         in_window = duration_seconds is None or elapsed_ns <= (skip_seconds + duration_seconds) * 1e9
         if interval > 0 and elapsed_ns > skip_seconds * 1e9 and in_window:
             rows.append(sample)
@@ -68,6 +83,7 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         "file": str(path.resolve()), "samples": len(rows),
         "metric": "CPU PresentBoundary cadence; not measured display FPS or GPU time",
         "clean_shutdown": dropped is not None, "dropped_samples": dropped, "missing_frames": gaps,
+        "ignored_unterminated_tail": ignored_tail,
         "warmup_seconds": skip_seconds, "observed_seconds": round(sum(intervals) / 1000, 3),
         "requested_duration_seconds": duration_seconds,
         "mean_interval_ms": round(statistics.mean(intervals), 4),
@@ -83,6 +99,19 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         "frames_over_33ms": sum(value > 33.333 for value in intervals),
         "frames_over_100ms": sum(value > 100 for value in intervals),
     }
+    worst = heapq.nlargest(10, rows, key=lambda row: row["boundary_interval_ns"])
+    timing_fields = FIELDS[2:5] + tuple(key for key in DIAGNOSTIC_FIELDS if key.endswith("_ns") and key in columns)
+    result["longest_intervals"] = [{
+        "frame": row["frame"],
+        "recorded_elapsed_seconds": round(row["recorded_elapsed_ns"] / 1e9, 6),
+        "boundary_interval_ms": round(row["boundary_interval_ns"] / 1e6, 4),
+        "cpu_interval_timings_ms": {key.removesuffix("_ns"): round(row[key] / 1e6, 4) for key in timing_fields},
+        "encoder_same_frame": [],
+    } for row in worst]
+    result["longest_intervals_note"] = (
+        "CPU interval timings and encoder samples are shown separately, not added as a causal breakdown. "
+        "Recorded elapsed time omits lost intervals; scene/focus events are not inferred."
+    )
     if columns != FIELDS:
         result["cpu_diagnostics"] = {
             "scope": "Immediate/deferred recording calls between CPU boundaries; not GPU execution counts",
@@ -94,12 +123,18 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         }
     encoder = path.with_name(path.stem + ".encoder.csv")
     if encoder.is_file():
-        result["encoder_diagnostics"] = summarize_encoder(encoder, rows[0]["frame"], rows[-1]["frame"], allow_incomplete)
+        result["encoder_diagnostics"] = summarize_encoder(
+            encoder, rows[0]["frame"], rows[-1]["frame"], allow_incomplete,
+            selected_frames={row["frame"] for row in worst})
+        selected = result["encoder_diagnostics"].pop("selected_frame_samples")
+        for interval in result["longest_intervals"]:
+            interval["encoder_same_frame"] = selected.get(str(interval["frame"]), [])
     return result
 
 
-def summarize_encoder(path: Path, first_frame: int, last_frame: int, allow_incomplete: bool) -> dict:
-    lines = path.read_text().splitlines()
+def summarize_encoder(path: Path, first_frame: int, last_frame: int, allow_incomplete: bool,
+                      selected_frames: set[int] | None = None) -> dict:
+    lines, ignored_tail = report_lines(path, allow_incomplete)
     dropped = next((int(line.split("=", 1)[1]) for line in lines if line.startswith("# dropped_samples=")), None)
     if dropped is not None and dropped < 0:
         raise ValueError("Negative encoder dropped sample count")
@@ -108,17 +143,24 @@ def summarize_encoder(path: Path, first_frame: int, last_frame: int, allow_incom
     if tuple(reader.fieldnames or ()) != columns:
         raise ValueError("Unsupported encoder report header")
     samples = []
+    selected = {}
     for row in reader:
+        if None in row or any(row.get(key) is None for key in columns):
+            raise ValueError("Malformed encoder report row")
         sample = {key: int(row[key]) for key in columns}
         if any(value < 0 for value in sample.values()):
             raise ValueError("Negative encoder report value")
         if first_frame <= sample["frame"] <= last_frame:
             samples.append(sample)
+            if selected_frames and sample["frame"] in selected_frames:
+                selected.setdefault(str(sample["frame"]), []).append({
+                    key.removesuffix("_ns"): round(sample[key] / 1e6, 4) for key in columns[1:]})
     if (dropped is None or dropped > 0) and not allow_incomplete:
         raise ValueError("Encoder report is incomplete or lost samples")
     return {
         "scope": "Encoding-thread wall time, matched by frame ID; not GPU time or display FPS",
         "file": str(path), "samples": len(samples), "dropped_samples": dropped,
+        "ignored_unterminated_tail": ignored_tail, "selected_frame_samples": selected,
         "mean_ms": {key.removesuffix("_ns"): round(statistics.mean(s[key] for s in samples) / 1e6, 4)
                     for key in columns[1:]} if samples else {},
         "p99_ms": {key.removesuffix("_ns"): round(percentile([s[key] / 1e6 for s in samples], .99), 4)
