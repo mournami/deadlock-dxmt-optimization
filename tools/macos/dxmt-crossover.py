@@ -69,6 +69,9 @@ def promote(variant: str) -> None:
         state_tested = "om_state_dedup_default" in manifest
         if state_tested:
             lab.device_probe("om-state-probe.exe", "om_state_readback_passed")
+        worker_tested = "shader_worker_default" in manifest
+        if worker_tested:
+            lab.shader_workers_probe()
         # The previous ready pointer survives every failure above.
         atomic_json(lab.LAB / ("ready-" + variant + ".json"), {
             "variant": variant, "install": str(snapshot), "sha256": hashes,
@@ -76,6 +79,7 @@ def promote(variant: str) -> None:
             "source_files_sha256": manifest["source_files_sha256"],
             "validated_at": datetime.now().isoformat(), "validation": "dll-and-gpu-readback",
             "om_state_tested": state_tested,
+            "shader_worker_tested": worker_tested,
         })
         print("Ready build published:", variant, identity)
 

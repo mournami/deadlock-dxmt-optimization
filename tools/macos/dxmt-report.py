@@ -16,6 +16,7 @@ FIELDS = ("frame", "boundary_interval_ns", "command_queue_wait_ns", "resource_sy
 DIAGNOSTIC_FIELDS = ("om_blend_calls", "om_blend_redundant", "om_depth_calls", "om_depth_redundant",
     "om_blend_commands", "om_depth_commands", "layer_query_ns", "layer_wait_ns",
     "present_pipeline_build_ns", "layer_update_ns", "display_changes", "present_pipeline_builds")
+SCHEDULER_FIELDS = ("shader_workers", "shader_workers_active", "shader_jobs_queued", "shader_worker_limit")
 
 
 def report_lines(path: Path, allow_incomplete: bool) -> tuple[list[str], bool]:
@@ -45,7 +46,7 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         raise ValueError("Negative dropped sample count")
     reader = csv.DictReader(io.StringIO("\n".join(line for line in lines if not line.startswith("#"))))
     columns = tuple(reader.fieldnames or ())
-    if columns not in (FIELDS, FIELDS + DIAGNOSTIC_FIELDS):
+    if columns not in (FIELDS, FIELDS + DIAGNOSTIC_FIELDS, FIELDS + DIAGNOSTIC_FIELDS + SCHEDULER_FIELDS):
         raise ValueError("Unsupported frame report header")
     rows = []
     previous = None
@@ -121,6 +122,15 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
             "max_ms": {key.removesuffix("_ns"): round(max(row[key] for row in rows) / 1e6, 4)
                        for key in DIAGNOSTIC_FIELDS if key.endswith("_ns")},
         }
+    if all(key in columns for key in SCHEDULER_FIELDS):
+        result["shader_scheduler_snapshots"] = {
+            "scope": "Atomic snapshots at CPU Present; not active worker CPU time or completed jobs",
+            "mean": {key: round(statistics.mean(row[key] for row in rows), 3) for key in SCHEDULER_FIELDS},
+            "max": {key: max(row[key] for row in rows) for key in SCHEDULER_FIELDS},
+        }
+        for interval in result["longest_intervals"]:
+            row = next(row for row in worst if row["frame"] == interval["frame"])
+            interval["shader_scheduler_snapshot"] = {key: row[key] for key in SCHEDULER_FIELDS}
     encoder = path.with_name(path.stem + ".encoder.csv")
     if encoder.is_file():
         result["encoder_diagnostics"] = summarize_encoder(
@@ -139,8 +149,9 @@ def summarize_encoder(path: Path, first_frame: int, last_frame: int, allow_incom
     if dropped is not None and dropped < 0:
         raise ValueError("Negative encoder dropped sample count")
     reader = csv.DictReader(io.StringIO("\n".join(line for line in lines if not line.startswith("#"))))
-    columns = ("frame", "next_drawable_ns", "present_encode_ns")
-    if tuple(reader.fieldnames or ()) != columns:
+    columns = tuple(reader.fieldnames or ())
+    if columns not in (("frame", "next_drawable_ns", "present_encode_ns"),
+                       ("frame", "next_drawable_ns", "present_encode_ns", "pipeline_wait_ns")):
         raise ValueError("Unsupported encoder report header")
     samples = []
     selected = {}

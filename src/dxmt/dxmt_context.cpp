@@ -10,6 +10,17 @@
 
 namespace dxmt {
 
+bool ArgumentEncodingContext::profilePipelineWait() const { return queue_.FrameReportEnabled(); }
+
+void ArgumentEncodingContext::recordPipelineWait(uint64_t nanoseconds) {
+  // Encoder thread only; never read by the CPU producer.
+  if (pipeline_wait_frame_ != frame_id_) {
+    pipeline_wait_frame_ = frame_id_;
+    pipeline_wait_ns_ = 0;
+  }
+  pipeline_wait_ns_ += nanoseconds;
+}
+
 ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Device device, InternalCommandLibrary &lib) :
     emulated_cmd(device, lib, *this),
     clear_rt_cmd(device, lib, *this),
@@ -853,7 +864,9 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
       currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
       if (profiling)
         queue().ReportEncoder({currentFrameId(), next_drawable_ns,
-            uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count())});
+            uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
+            pipeline_wait_frame_ == currentFrameId() ? pipeline_wait_ns_ : 0});
+      pipeline_wait_ns_ = 0;
       if (data->after > 0)
         cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
       else

@@ -44,6 +44,16 @@ The companion `*.encoder.csv` records frame ID, time inside `nextDrawable` and t
 
 The analyzer also lists the ten longest CPU intervals with their CPU timings and any encoder samples bearing the same frame ID. Those two kinds of timing are displayed separately; they cannot safely be added as a causal breakdown. It does not infer an Alt+Tab event or classify loading as gameplay. Recorded elapsed time omits any lost intervals. For a forcibly stopped capture, `--allow-incomplete` discards an unterminated final line and reports that omission; malformed complete rows still fail validation.
 
+## Shader compilation CPU budget experiment
+
+The upstream scheduler can grow to twice the reported CPU concurrency and sets its compiler workers to `THREAD_PRIORITY_TIME_CRITICAL`. Experiment now requests at most four workers at normal thread priority. This limits competition with the game's CPU/input work during compilation bursts. The dependency queues and actual shader/pipeline compilation remain intact; it never skips a required pipeline wait. The policy is generic, not an executable-name condition.
+
+`DXMT_SHADER_WORKERS=1..64` selects a bounded pool at normal priority; `=0` restores the legacy concurrency/priority. The build default is four in experiment and legacy in baseline. CrossOver launch entries explicitly select four/zero. [Microsoft documents the thread priority values](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadpriority); Wine/macOS mapping and actual CPU contention still require measurement. This is a hypothesis for compilation bursts, not proof of the cause of lobby slowdown, mouse symptoms or Alt+Tab freezes. Cold compilation may take longer with the smaller pool. No FPS gain is claimed yet.
+
+CPU CSV additionally captures atomic scheduler snapshots (created workers, active work, queued runnable jobs, configured limit). These are point-in-time values, not CPU utilization or completed jobs. New encoder CSV adds `pipeline_wait_ns`, accumulating GetPipeline calls that were not ready at entry, tagged by encoder frame ID. Ready pipelines avoid timing clock reads. The analyzer retains compatibility with older CPU/encoder schemas and shows scheduler snapshots beside the longest intervals.
+
+The private Win32 `tests/shader_workers_probe.cpp` verifies worker limits, normal/legacy priority API values, queue accounting, dependency continuations and concurrent submitters. Build it with the prepared LLVM-MinGW C++ compiler using `-std=c++20 -O2 -static -I src/util -I src/dxmt` as `shader-workers-probe.exe` in the lab. Static runtime linking avoids copying unrelated C++ DLLs into the private Wine bottle. New builds must pass this probe as well as the existing DLL and offscreen GPU tests before replacing their ready pointers.
+
 ## Validation and comparison
 
 The offscreen GPU test verifies repeated state followed by draws, changed blend factors, sample masks and stencil references, NULL/default objects, exact state getter bits, new encoders after readback, ClearState and deferred command-list execution with both restore modes. It compares actual output pixels, not only successful API return codes. This is a correctness check, not a game performance benchmark.

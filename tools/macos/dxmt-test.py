@@ -131,17 +131,21 @@ def run(variant: str, require_ready: bool = False) -> None:
             "variant": variant, "source_commit": build_record.get("source_commit"),
             "source_files_sha256": build_record.get("source_files_sha256", {}),
             "loaded_dxmt_sha256": lab.staged_hashes(), "om_state_dedup": variant == "experiment",
+            "shader_workers_requested": 4 if variant == "experiment" else 0,
             "metric": "CPU/encoder wall time; not display FPS or input latency",
         }, indent=2) + "\n")
         if (PREFIX / "dosdevices/z:").resolve() != Path("/"):
             raise RuntimeError("The test bottle has no Z: mapping to the Mac filesystem")
         wine_report = "Z:" + str(report_dir)
         dedup = "1" if variant == "experiment" else "0"
+        workers = "4" if variant == "experiment" else "0"
         configure(PREFIX / "cxbottle.conf", {"EnvironmentVariables": {
-            "DXMT_FRAME_REPORT_DIR": wine_report, "DXMT_OM_STATE_DEDUP": dedup}})
+            "DXMT_FRAME_REPORT_DIR": wine_report, "DXMT_OM_STATE_DEDUP": dedup,
+            "DXMT_SHADER_WORKERS": workers}})
         env = lab.environment()
         env["DXMT_FRAME_REPORT_DIR"] = wine_report
         env["DXMT_OM_STATE_DEDUP"] = dedup
+        env["DXMT_SHADER_WORKERS"] = workers
         env["MTL_HUD_ENABLED"] = "1"
         env["WINEDEBUG"] = "-all"
         print("Starting private Windows Steam / Deadlock (DX11).", flush=True)

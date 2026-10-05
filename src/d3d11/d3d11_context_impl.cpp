@@ -4401,7 +4401,12 @@ public:
       auto render_encoder = enc.currentRenderEncoder();
       render_encoder->use_tessellation = 1;
       MTL_COMPILED_TESSELLATION_MESH_PIPELINE GraphicsPipeline{};
+      const bool profile_wait = enc.profilePipelineWait() && !pso->GetIsDone();
+      const auto wait_start = profile_wait ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       pso->GetPipeline(&GraphicsPipeline); // may block
+      if (profile_wait)
+        enc.recordPipelineWait(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - wait_start).count());
       enc.tess_num_output_control_point_element = GraphicsPipeline.NumControlPointOutputElement;
       enc.tess_threads_per_patch = GraphicsPipeline.ThreadsPerPatch;
       if (!GraphicsPipeline.PipelineState)
@@ -4448,7 +4453,12 @@ public:
       auto render_encoder = enc.currentRenderEncoder();
       render_encoder->use_geometry = 1;
       MTL_COMPILED_GRAPHICS_PIPELINE GraphicsPipeline{};
+      const bool profile_wait = enc.profilePipelineWait() && !pso->GetIsDone();
+      const auto wait_start = profile_wait ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       pso->GetPipeline(&GraphicsPipeline); // may block
+      if (profile_wait)
+        enc.recordPipelineWait(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - wait_start).count());
       if (!GraphicsPipeline.PipelineState)
         return;
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
@@ -4503,7 +4513,12 @@ public:
     device->CreateGraphicsPipeline(&pipelineDesc, &pipeline);
     EmitST([pso = std::move(pipeline)](ArgumentEncodingContext& enc) {
       MTL_COMPILED_GRAPHICS_PIPELINE GraphicsPipeline{};
+      const bool profile_wait = enc.profilePipelineWait() && !pso->GetIsDone();
+      const auto wait_start = profile_wait ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       pso->GetPipeline(&GraphicsPipeline); // may block
+      if (profile_wait)
+        enc.recordPipelineWait(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - wait_start).count());
       if (!GraphicsPipeline.PipelineState)
         return;
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
@@ -4664,7 +4679,12 @@ public:
                               CS->reflection().ThreadgroupSize[2]}](
                ArgumentEncodingContext &enc) {
       MTL_COMPILED_COMPUTE_PIPELINE ComputePipeline;
+      const bool profile_wait = enc.profilePipelineWait() && !pso->GetIsDone();
+      const auto wait_start = profile_wait ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       pso->GetPipeline(&ComputePipeline); // may block
+      if (profile_wait)
+        enc.recordPipelineWait(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - wait_start).count());
       if (!ComputePipeline.PipelineState)
         return;
       auto &cmd = enc.encodeComputeCommand<wmtcmd_compute_setpso>();

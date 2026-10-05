@@ -51,6 +51,7 @@ public:
                                                  *ppPipeline) = 0;
 
   virtual bool IsTraced() = 0;
+  virtual std::array<uint64_t, 4> GetShaderCompileStats() = 0;
 
   virtual Device& GetDXMTDevice() = 0;
 

@@ -9,6 +9,7 @@ constexpr int kDXMTShaderCacheVersion = 7;
 class MTLD3D11PipelineCacheBase {
 public:
   virtual ~MTLD3D11PipelineCacheBase() {}
+  virtual std::array<uint64_t, 4> GetShaderCompileStats() = 0;
   virtual HRESULT AddVertexShader(const void *pBytecode, uint32_t BytecodeLength, ID3D11VertexShader **ppShader) = 0;
   virtual HRESULT AddPixelShader(const void *pBytecode, uint32_t BytecodeLength, ID3D11PixelShader **ppShader) = 0;
   virtual HRESULT AddHullShader(const void *pBytecode, uint32_t BytecodeLength, ID3D11HullShader **ppShader) = 0;

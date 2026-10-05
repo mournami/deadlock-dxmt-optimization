@@ -139,6 +139,8 @@ def build(variant: str, jobs: int) -> None:
         # performance differences being tested.
         for relative in ("src/dxmt/dxmt_frame_report.hpp", "src/dxmt/dxmt_command_queue.cpp",
                          "src/dxmt/dxmt_presenter.cpp", "src/dxmt/dxmt_presenter.hpp", "src/dxmt/dxmt_context.cpp",
+                         "src/dxmt/dxmt_context.hpp", "src/dxmt/dxmt_tasks.hpp", "src/d3d11/d3d11_device.cpp",
+                         "src/d3d11/d3d11_device.hpp", "src/d3d11/d3d11_pipeline_cache.hpp",
                          "src/airconv/shaders/air_tessellation.metal"):
             shutil.copy2(SOURCE / relative, source / relative)
         shutil.copytree(SOURCE / "include/native/directx", source / "include/native/directx",
@@ -165,11 +167,25 @@ def build(variant: str, jobs: int) -> None:
         if context.count(default) != 1:
             raise RuntimeError("Baseline state optimization toggle needs review")
         (source / "src/d3d11/d3d11_context_impl.cpp").write_text(context.replace(default, 'env::getEnvVar("DXMT_OM_STATE_DEDUP") == "1"'))
+        cache = (SOURCE / "src/d3d11/d3d11_pipeline_cache.cpp").read_text()
+        worker_default = "static constexpr unsigned kDefaultShaderWorkerLimit = 4;"
+        if cache.count(worker_default) != 1:
+            raise RuntimeError("Baseline shader worker policy needs review")
+        (source / "src/d3d11/d3d11_pipeline_cache.cpp").write_text(cache.replace(worker_default,
+            "static constexpr unsigned kDefaultShaderWorkerLimit = 0;"))
         swapchain = subprocess.check_output(["git", "show", pin["commit"] + ":src/d3d11/d3d11_swapchain.cpp"], cwd=SOURCE, text=True)
         if swapchain.count("presenter->synchronizeLayerProperties()") != 2:
             raise RuntimeError("Baseline presentation instrumentation needs review")
-        (source / "src/d3d11/d3d11_swapchain.cpp").write_text(swapchain.replace(
-            "presenter->synchronizeLayerProperties()", "presenter->synchronizeLayerProperties(cmd_queue.FrameProfiler())"))
+        swapchain = swapchain.replace("presenter->synchronizeLayerProperties()",
+            "presenter->synchronizeLayerProperties(cmd_queue.FrameProfiler())")
+        current_swapchain = (SOURCE / "src/d3d11/d3d11_swapchain.cpp").read_text()
+        start = "    auto &cmd_queue = device_->GetDXMTDevice().queue();"
+        end = "    auto chunk = cmd_queue.CurrentChunk();"
+        if swapchain.count(start) != 1 or current_swapchain.count(start) != 1:
+            raise RuntimeError("Baseline scheduler telemetry needs review")
+        sample = current_swapchain[current_swapchain.index(start):current_swapchain.index(end)]
+        swapchain = swapchain[:swapchain.index(start)] + sample + swapchain[swapchain.index(end):]
+        (source / "src/d3d11/d3d11_swapchain.cpp").write_text(swapchain)
     compiler = CHAIN / "llvm-mingw-20231017-ucrt-macos-universal/bin"
     cross = LAB / f"cross-win64-{variant}.ini"
     binaries = {"c": "gcc", "cpp": "g++", "ar": "ar", "strip": "strip", "windres": "windres"}
@@ -204,7 +220,9 @@ def build(variant: str, jobs: int) -> None:
             for relative in ("src/dxmt/dxmt_frame_report.hpp", "src/dxmt/dxmt_command_queue.cpp",
                              "src/dxmt/dxmt_command_queue.hpp", "src/d3d11/d3d11_swapchain.cpp",
                              "src/airconv/shaders/air_tessellation.metal", "src/d3d11/d3d11_context_impl.cpp",
-                             "src/dxmt/dxmt_presenter.cpp", "src/dxmt/dxmt_presenter.hpp", "src/dxmt/dxmt_context.cpp")
+                             "src/dxmt/dxmt_presenter.cpp", "src/dxmt/dxmt_presenter.hpp", "src/dxmt/dxmt_context.cpp",
+                             "src/dxmt/dxmt_context.hpp", "src/dxmt/dxmt_tasks.hpp", "src/d3d11/d3d11_device.cpp",
+                             "src/d3d11/d3d11_device.hpp", "src/d3d11/d3d11_pipeline_cache.cpp", "src/d3d11/d3d11_pipeline_cache.hpp")
         },
         "baseline_includes_identical_recorder": True,
         "binary_sha256": {relative: hashlib.sha256((install / relative).read_bytes()).hexdigest()
@@ -212,6 +230,7 @@ def build(variant: str, jobs: int) -> None:
                                            "x86_64-windows/winemetal.dll", "x86_64-unix/winemetal.so")},
         "runtime_tested": False,
         "om_state_dedup_default": variant == "experiment",
+        "shader_worker_default": 4 if variant == "experiment" else 0,
     }, indent=2) + "\n")
 
 

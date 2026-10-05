@@ -1031,6 +1031,7 @@ public:
   };
 
   Device &GetDXMTDevice() override { return device_; };
+  std::array<uint64_t, 4> GetShaderCompileStats() override { return pipeline_cache_->GetShaderCompileStats(); }
 
   void CreateCommandList(ID3D11CommandList** pCommandList) final {
     commandlist_pool_->CreateCommandList(pCommandList);

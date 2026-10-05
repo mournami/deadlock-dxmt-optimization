@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
   std::getline(file, second);
   std::getline(file, footer);
   assert(header.starts_with("frame,boundary_interval_ns,"));
-  assert(first == "0,0,500000,100000,200000,4,0,0,7,0,0,0,0,0,0,0,0,0,0,0");
+  assert(first == "0,0,500000,100000,200000,4,0,0,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0");
   assert(second.starts_with("1,"));
   assert(std::stoull(second.substr(2)) >= 1000000);
   assert(footer == "# dropped_samples=0");
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
     FrameReport<> report(stress);
     std::thread encoder([&]() {
       for (uint64_t i = 0; i < 100000; ++i)
-        report.submitEncoder({i, i + 10, i + 20});
+        report.submitEncoder({i, i + 10, i + 20, i + 30});
     });
     for (uint64_t i = 0; i < 100000; ++i) {
       FrameReportSample sample;
@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
     else if (!line.starts_with("frame,")) {
       const auto frame = std::stoull(line);
       if (rows) assert(frame > previous);
-      assert(line == std::to_string(frame) + "," + std::to_string(frame + 10) + "," + std::to_string(frame + 20));
+      assert(line == std::to_string(frame) + "," + std::to_string(frame + 10) + "," + std::to_string(frame + 20) + "," + std::to_string(frame + 30));
       previous = frame;
       ++rows;
     }

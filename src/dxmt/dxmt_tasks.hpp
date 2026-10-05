@@ -3,6 +3,7 @@
 #include "thread.hpp"
 #include "util_win32_compat.h"
 #include <atomic>
+#include <algorithm>
 #include <queue>
 #include <unordered_map>
 
@@ -18,13 +19,16 @@ template <typename Task> class task_scheduler {
 public:
   void submit(Task task);
 
-  task_scheduler();
+  explicit task_scheduler(unsigned worker_limit = 0);
   ~task_scheduler();
 
   uint64_t
   get_running_threads() {
     return running.load(std::memory_order_relaxed);
   }
+  uint64_t get_worker_count() const { return threads.load(std::memory_order_relaxed); }
+  uint64_t get_worker_limit() const { return max_threads; }
+  uint64_t get_queued_tasks() const { return queued.load(std::memory_order_relaxed); }
 
 private:
   void worker_func();
@@ -41,14 +45,19 @@ private:
 
   std::atomic_bool destroyed = false;
   std::atomic_uint64_t running = 0;
-  uint64_t threads;
+  std::atomic_uint64_t threads = 0;
+  std::atomic_uint64_t queued = 0;
   uint64_t max_threads;
+  int worker_priority;
 };
 
-template <typename Task> task_scheduler<Task>::task_scheduler() {
-  max_threads = dxmt::thread::hardware_concurrency() * 2;
+template <typename Task> task_scheduler<Task>::task_scheduler(unsigned worker_limit) {
+  // Zero preserves legacy concurrency/priority for A/B and rollback.
+  max_threads = worker_limit ? std::clamp<unsigned>(worker_limit, 1, 64)
+                            : std::max<unsigned>(2, dxmt::thread::hardware_concurrency() * 2);
+  worker_priority = worker_limit ? 0 /* THREAD_PRIORITY_NORMAL */ : THREAD_PRIORITY_TIME_CRITICAL;
   workers_.reserve(max_threads);
-  threads = 2;
+  threads = std::min<uint64_t>(2, max_threads);
 
   for (unsigned i = 0; i < threads; i++) {
     workers_.emplace_back([this]() { worker_func(); });
@@ -72,7 +81,7 @@ void
 task_scheduler<Task>::worker_func() {
   struct task_trait<Task> task_trait;
   std::vector<Task> continutation_buffer;
-  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+  SetThreadPriority(GetCurrentThread(), worker_priority);
   while (!destroyed.load()) {
     Task task;
     {
@@ -87,9 +96,11 @@ task_scheduler<Task>::worker_func() {
       if (!task_continuation_queue_.empty()) {
         task = task_continuation_queue_.front();
         task_continuation_queue_.pop();
+        queued.fetch_sub(1, std::memory_order_relaxed);
       } else if (!task_queue_.empty()) {
         task = task_queue_.front();
         task_queue_.pop();
+        queued.fetch_sub(1, std::memory_order_relaxed);
       } else {
         break;
       }
@@ -111,6 +122,7 @@ task_scheduler<Task>::worker_func() {
           std::unique_lock<dxmt::mutex> lock(worker_mutex_);
           for (auto &task : continutation_buffer) {
             task_continuation_queue_.push(task);
+            queued.fetch_add(1, std::memory_order_relaxed);
           }
         }
         worker_cond_.notify_all();
@@ -134,6 +146,7 @@ void
 task_scheduler<Task>::submit(Task task) {
   std::unique_lock<dxmt::mutex> lock(worker_mutex_);
   task_queue_.push(task);
+  queued.fetch_add(1, std::memory_order_relaxed);
 
   if (running.load(std::memory_order_relaxed) == threads && threads < max_threads) {
     workers_.emplace_back([this]() { worker_func(); });

@@ -649,6 +649,8 @@ public:
   uint64_t currentFrameId() {return frame_id_;}
 
   CommandQueue& queue() { return queue_;}
+  bool profilePipelineWait() const;
+  void recordPipelineWait(uint64_t nanoseconds);
 
   void
   $$setEncodingContext(uint64_t seq_id, uint64_t frame_id);
@@ -722,6 +724,8 @@ private:
 
   uint64_t seq_id_;
   uint64_t frame_id_;
+  uint64_t pipeline_wait_frame_ = ~0ull;
+  uint64_t pipeline_wait_ns_ = 0;
 
   struct chunk {
     void *ptr;

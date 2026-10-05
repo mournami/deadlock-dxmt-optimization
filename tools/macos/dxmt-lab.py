@@ -671,6 +671,29 @@ def device_probe(executable_name: str = "device-probe.exe", success_marker: str 
         stop_bottle(BOTTLE)
 
 
+def shader_workers_probe() -> None:
+    private_runtime()
+    assert_probe_stopped()
+    executable = LAB / "shader-workers-probe.exe"
+    prefix = private_prefix(BOTTLE)
+    if not executable.is_file() or not executable.resolve().is_relative_to(LAB.resolve()):
+        raise RuntimeError("The private shader-workers-probe.exe is missing")
+    log = LAB / "probe-logs/shader-workers.log"
+    log.parent.mkdir(exist_ok=True)
+    try:
+        result = subprocess.run([
+            str(RUNTIME / "bin/wine"), "--bottle", BOTTLE, "--no-gui", "--no-update",
+            "--debugmsg", "-all", "--cx-app", "Z:" + executable.as_posix(),
+        ], env=environment(), capture_output=True, text=True, timeout=45)
+        output = result.stdout + result.stderr
+        log.write_text(output)
+        if result.returncode or "shader_workers_passed" not in output:
+            raise RuntimeError(f"Shader worker scheduler check failed ({result.returncode}); inspect {log}")
+        print("Shader worker scheduler check passed", flush=True)
+    finally:
+        stop_bottle(BOTTLE)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)

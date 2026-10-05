@@ -14,13 +14,15 @@ namespace dxmt {
 enum class FrameCounter : size_t {
   OMBlendCalls, OMBlendRedundant, OMDepthCalls, OMDepthRedundant,
   OMBlendCommands, OMDepthCommands, LayerQueryNS, LayerWaitNS,
-  PresentPipelineBuildNS, LayerUpdateNS, DisplayChanges, PresentPipelineBuilds, Count
+  PresentPipelineBuildNS, LayerUpdateNS, DisplayChanges, PresentPipelineBuilds,
+  ShaderWorkers, ShaderWorkersActive, ShaderJobsQueued, ShaderWorkerLimit, Count
 };
 constexpr size_t kFrameCounterCount = size_t(FrameCounter::Count);
 inline constexpr const char *kFrameCounterCSV =
     "om_blend_calls,om_blend_redundant,om_depth_calls,om_depth_redundant,"
     "om_blend_commands,om_depth_commands,layer_query_ns,layer_wait_ns,"
-    "present_pipeline_build_ns,layer_update_ns,display_changes,present_pipeline_builds";
+    "present_pipeline_build_ns,layer_update_ns,display_changes,present_pipeline_builds,"
+    "shader_workers,shader_workers_active,shader_jobs_queued,shader_worker_limit";
 
 // Atomics aggregate immediate/deferred recording calls between CPU boundaries.
 // These are recording intervals, not GPU execution counts for the same frame.
@@ -29,6 +31,9 @@ class FrameCounters {
 public:
   void add(FrameCounter counter, uint64_t value = 1) {
     values_[size_t(counter)].fetch_add(value, std::memory_order_relaxed);
+  }
+  void set(FrameCounter counter, uint64_t value) {
+    values_[size_t(counter)].store(value, std::memory_order_relaxed);
   }
   std::array<uint64_t, kFrameCounterCount> take() {
     std::array<uint64_t, kFrameCounterCount> result;
@@ -42,6 +47,7 @@ struct EncoderReportSample {
   uint64_t frame = 0;
   uint64_t next_drawable_ns = 0;
   uint64_t present_encode_ns = 0;
+  uint64_t pipeline_wait_ns = 0;
 };
 
 // CPU-side frame data only. Reading the encoder-owned fields of
@@ -120,7 +126,7 @@ template <typename Thread = std::thread> class FrameReport {
     }
     EncoderReportSample encoder;
     for (size_t i = 0; i < 512 && encoder_queue_.pop(encoder); ++i) {
-      encoder_file_ << encoder.frame << ',' << encoder.next_drawable_ns << ',' << encoder.present_encode_ns << '\n';
+      encoder_file_ << encoder.frame << ',' << encoder.next_drawable_ns << ',' << encoder.present_encode_ns << ',' << encoder.pipeline_wait_ns << '\n';
       if (++rows % 256 == 0) encoder_file_.flush();
     }
   }
@@ -156,7 +162,7 @@ public:
     encoder_file_.open(path.parent_path() / (path.stem().string() + ".encoder.csv"));
     if (encoder_file_) {
       encoder_file_.imbue(std::locale::classic());
-      encoder_file_ << "frame,next_drawable_ns,present_encode_ns\n";
+      encoder_file_ << "frame,next_drawable_ns,present_encode_ns,pipeline_wait_ns\n";
       encoder_enabled_ = true;
     }
     writer_ = Thread([this]() { run(); });

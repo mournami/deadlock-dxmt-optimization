@@ -14,6 +14,20 @@
 
 namespace dxmt {
 
+static constexpr unsigned kDefaultShaderWorkerLimit = 4;
+
+static unsigned shaderWorkerLimit() {
+  const auto value = env::getEnvVar("DXMT_SHADER_WORKERS");
+  if (value.empty()) return kDefaultShaderWorkerLimit;
+  try {
+    size_t used = 0;
+    const auto limit = std::stoul(value, &used);
+    if (used == value.size() && limit <= 64) return unsigned(limit);
+  } catch (const std::exception &) {}
+  WARN("Invalid DXMT_SHADER_WORKERS; using build default");
+  return kDefaultShaderWorkerLimit;
+}
+
 class MTLD3D11InputLayout final
     : public MTLD3D11DeviceChild<IMTLD3D11InputLayout> {
 public:
@@ -451,7 +465,12 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   }
 
 public:
-  PipelineCache(MTLD3D11Device *pDevice) : device(pDevice), blend_states(pDevice), so_layouts(pDevice) {
+  std::array<uint64_t, 4> GetShaderCompileStats() override {
+    return {scheduler_.get_worker_count(), scheduler_.get_running_threads(),
+            scheduler_.get_queued_tasks(), scheduler_.get_worker_limit()};
+  }
+
+  PipelineCache(MTLD3D11Device *pDevice) : scheduler_(shaderWorkerLimit()), device(pDevice), blend_states(pDevice), so_layouts(pDevice) {
     auto cache_path = str::format(
         "dxmt/", env::getExeName(), "/shaders_", (unsigned int)pDevice->GetDXMTDevice().metalVersion(), ".db"
     );

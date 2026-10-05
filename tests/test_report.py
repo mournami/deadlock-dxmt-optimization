@@ -92,4 +92,23 @@ class PauseAnalysis(unittest.TestCase):
         self.assertEqual(result["samples"], 200)
         self.assertTrue(result["ignored_unterminated_tail"])
 
+    def test_scheduler_snapshots_and_pipeline_wait_schema(self):
+        fields=report.FIELDS+report.DIAGNOSTIC_FIELDS+report.SCHEDULER_FIELDS
+        with self.cpu.open("w") as out:
+            writer=csv.DictWriter(out,fieldnames=fields);writer.writeheader()
+            for frame in range(200):
+                row=dict.fromkeys(fields,0)
+                row.update(frame=frame,boundary_interval_ns=1000000 if frame!=140 else 4000000000,
+                           shader_workers=4,shader_workers_active=3,shader_jobs_queued=8,shader_worker_limit=4)
+                writer.writerow(row)
+            out.write("# dropped_samples=0\n")
+        self.encoder.write_text("frame,next_drawable_ns,present_encode_ns,pipeline_wait_ns\n"
+                                "140,1000,2000,3000000000\n# dropped_samples=0\n")
+        result=report.summarize(self.cpu,skip_seconds=0)
+        self.assertEqual(result["shader_scheduler_snapshots"]["max"]["shader_worker_limit"],4)
+        self.assertNotIn("shader_worker_limit",result["cpu_diagnostics"]["counts"])
+        worst=result["longest_intervals"][0]
+        self.assertEqual(worst["shader_scheduler_snapshot"]["shader_jobs_queued"],8)
+        self.assertEqual(worst["encoder_same_frame"][0]["pipeline_wait"],3000)
+
 if __name__ == "__main__": unittest.main()

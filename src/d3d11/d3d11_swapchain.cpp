@@ -597,6 +597,13 @@ public:
 
     device_context_->PrepareFlush();
     auto &cmd_queue = device_->GetDXMTDevice().queue();
+    if (auto profile = cmd_queue.FrameProfiler()) {
+      const auto workers = device_->GetShaderCompileStats();
+      profile->set(FrameCounter::ShaderWorkers, workers[0]);
+      profile->set(FrameCounter::ShaderWorkersActive, workers[1]);
+      profile->set(FrameCounter::ShaderJobsQueued, workers[2]);
+      profile->set(FrameCounter::ShaderWorkerLimit, workers[3]);
+    }
     auto chunk = cmd_queue.CurrentChunk();
     chunk->signal_frame_latency_fence_ = cmd_queue.CurrentFrameSeq();
     if constexpr (EnableMetalFX) {
