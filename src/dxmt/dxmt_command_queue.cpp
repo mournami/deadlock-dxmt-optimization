@@ -52,17 +52,19 @@ CommandQueue::CommandQueue(WMT::Device device) :
   }
 
   const auto report_dir = env::getEnvVar("DXMT_FRAME_REPORT_DIR");
-  if (!report_dir.empty()) {
+  const auto mode = reportMode(env::getEnvVar("DXMT_REPORT_MODE"));
+  if (!report_dir.empty() && mode != ReportMode::Off) {
     static std::atomic<uint64_t> next_report{0};
     const auto file = env::getExeBaseName() + "_" + std::to_string(GetCurrentProcessId()) + "_" +
                       std::to_string(next_report.fetch_add(1, std::memory_order_relaxed)) + ".csv";
     try {
       auto reporter = std::make_unique<FrameReport<dxmt::thread>>(
-          std::filesystem::path(str::topath(report_dir.c_str())) / file
+          std::filesystem::path(str::topath(report_dir.c_str())) / file, mode
       );
-      if (reporter->enabled())
+      if (reporter->enabled()) {
+        reporter->setWriterPriority(ThreadPriority::Lowest);
         frame_report_ = std::move(reporter);
-      else
+      } else
         WARN("DXMT frame report could not be opened in ", report_dir);
     } catch (const std::exception &error) {
       WARN("DXMT frame report disabled: ", error.what());
@@ -187,6 +189,7 @@ CommandQueue::WaitForFinishThread() {
   env::setThreadName("dxmt-finish-thread");
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   uint64_t internal_seq = 1;
+  uint64_t next_memory_frame = 0;
   while (!stopped.load()) {
     ready_for_commit.wait(internal_seq, std::memory_order_acquire);
     if (stopped.load())
@@ -195,7 +198,21 @@ CommandQueue::WaitForFinishThread() {
     if (chunk.attached_cmdbuf.status() <= WMTCommandBufferStatusScheduled) {
       chunk.attached_cmdbuf.waitUntilCompleted();
     }
-    if (chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError) {
+    GPUReportSample gpu;
+    WMTCommandBufferStatus status;
+    if (frame_report_) {
+      const bool memory = chunk.frame_ >= next_memory_frame;
+      if (memory) next_memory_frame = chunk.frame_ + 60;
+      // Replaces the original second status() bridge call, not an extra call.
+      const auto completed = chunk.attached_cmdbuf.completionStats(memory);
+      status = WMTCommandBufferStatus(completed.status);
+      gpu = {chunk.frame_, internal_seq, completed.gpu_start_ns, completed.gpu_end_ns,
+             completed.kernel_start_ns, completed.kernel_end_ns, completed.status,
+             completed.allocated_bytes, uint64_t(memory)};
+    } else {
+      status = chunk.attached_cmdbuf.status();
+    }
+    if (status == WMTCommandBufferStatusError) {
       ERR("Device error at frame ", chunk.frame_, ": ", chunk.attached_cmdbuf.error().description().getUTF8String());
     }
     if (auto logs = chunk.attached_cmdbuf.logs()) {
@@ -211,6 +228,7 @@ CommandQueue::WaitForFinishThread() {
     cpu_coherent.signal(internal_seq);
     chunk_ongoing.fetch_sub(1, std::memory_order_release);
     chunk_ongoing.notify_one();
+    if (frame_report_) frame_report_->submitGPU(gpu);
 
     staging_allocator.free_blocks(internal_seq);
     copy_temp_allocator.free_blocks(internal_seq);

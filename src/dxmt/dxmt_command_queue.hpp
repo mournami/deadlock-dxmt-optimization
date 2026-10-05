@@ -247,13 +247,15 @@ public:
   }
 
   bool FrameReportEnabled() const { return frame_report_ != nullptr; }
-  FrameCounters *FrameProfiler() { return frame_report_ ? &frame_counters_ : nullptr; }
+  FrameCounters *FrameProfiler() { return frame_report_ && frame_report_->full() ? &frame_counters_ : nullptr; }
+  FrameCounters *LightFrameProfiler() { return frame_report_ ? &frame_counters_ : nullptr; }
+  bool FullFrameReport() const { return frame_report_ && frame_report_->full(); }
   FrameEventRecorder *EventProfiler() { return frame_report_ ? frame_report_->eventRecorder() : nullptr; }
   // A nearby CPU interval label for concurrent DXGI calls, not a GPU frame ID.
   uint64_t EventFrame() const { return report_frame_.load(std::memory_order_relaxed); }
 
   void RecordFrameCounter(FrameCounter counter, uint64_t value = 1) {
-    if (unlikely(frame_report_ != nullptr)) frame_counters_.add(counter, value);
+    if (auto profile = FrameProfiler()) profile->add(counter, value);
   }
 
   void ReportEncoder(EncoderReportSample sample) {

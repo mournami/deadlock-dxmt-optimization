@@ -583,6 +583,10 @@ public:
     return MTLCommandBuffer_status(handle);
   }
 
+  WMTCommandBufferCompletion completionStats(bool sample_memory) {
+    return MTLCommandBuffer_completionStats(handle, sample_memory);
+  }
+
   Error
   error() {
     return Error{MTLCommandBuffer_error(handle)};

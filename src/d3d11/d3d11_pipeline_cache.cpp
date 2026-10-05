@@ -238,14 +238,32 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   CachedSM50Shader *CreateShader(const void *pBytecode,
                                  uint32_t BytecodeLength) {
+    auto profile = device->GetDXMTDevice().queue().LightFrameProfiler();
+    // CPU parsing/cache work can occur between Present calls. This path is
+    // infrequent compared with state/draw recording, so time it in light mode.
+    struct CreateTimer {
+      FrameCounters *profile;
+      std::chrono::steady_clock::time_point start;
+      ~CreateTimer() {
+        if (profile) profile->add(FrameCounter::ShaderCreateNS,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - start).count());
+      }
+    } timer{profile, profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}};
+    if (profile) {
+      profile->add(FrameCounter::ShaderCreateCalls);
+      profile->add(FrameCounter::ShaderBytecodeBytes, BytecodeLength);
+    }
     auto sha1 = Sha1HashState::compute(pBytecode, BytecodeLength);
     {
       std::shared_lock<std::shared_mutex> lock(mutex_shares);
       auto result = shaders_.find(sha1);
       if (result != shaders_.end()) {
+        if (profile) profile->add(FrameCounter::ShaderCreateCacheHits);
         return shaders_.at(sha1).get();
       }
     }
+    if (profile) profile->add(FrameCounter::ShaderCreateMisses);
     sm50_error_t err;
     sm50_shader_t sm50;
     MTL_SHADER_REFLECTION reflection;

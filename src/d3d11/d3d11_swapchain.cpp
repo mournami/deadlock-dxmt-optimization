@@ -599,7 +599,7 @@ public:
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr;
 
-    if (events) {
+    if (events && ShouldSampleWindow(present_profile.startNS(), cmd_queue.FullFrameReport())) {
       // Sample Wine's window state only; do not install hooks, capture keyboard
       // input, change focus or inspect the other foreground application's name.
       FrameEventScope window(events, FrameEvent::WindowState, frame, thread, 0, object);
@@ -626,7 +626,7 @@ public:
       FrameEventScope flush_profile(events, FrameEvent::PrepareFlush, frame, thread, 0, object);
       device_context_->PrepareFlush();
     }
-    if (auto profile = cmd_queue.FrameProfiler()) {
+    if (auto profile = cmd_queue.LightFrameProfiler()) {
       const auto workers = device_->GetShaderCompileStats();
       profile->set(FrameCounter::ShaderWorkers, workers[0]);
       profile->set(FrameCounter::ShaderWorkersActive, workers[1]);
@@ -894,6 +894,13 @@ public:
   }
 
 private:
+  std::atomic<uint64_t> next_window_sample_ns_{0};
+  bool ShouldSampleWindow(uint64_t now, bool full) {
+    if (full) return true;
+    auto next = next_window_sample_ns_.load(std::memory_order_relaxed);
+    return now >= next && next_window_sample_ns_.compare_exchange_strong(
+        next, now + 250000000, std::memory_order_relaxed);
+  }
   FrameEventScope ProfileEvent(FrameEvent event, uint64_t detail = 0) {
     auto &queue = device_->GetDXMTDevice().queue();
     auto events = queue.EventProfiler();

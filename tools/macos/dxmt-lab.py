@@ -707,39 +707,56 @@ def presentation_probe() -> None:
         raise RuntimeError("The private presentation-probe.exe is missing")
     if (prefix / "dosdevices/z:").resolve() != Path("/"):
         raise RuntimeError("The private probe bottle has no Z: mapping")
-    report = LAB / "probe-logs" / ("presentation-" + str(time.time_ns()))
-    report.mkdir(parents=True, mode=0o700)
-    env = environment()
-    env["DXMT_FRAME_REPORT_DIR"] = "Z:" + report.as_posix()
-    try:
-        result = subprocess.run([
-            str(RUNTIME / "bin/wine"), "--bottle", BOTTLE, "--no-gui", "--no-update",
-            "--dll", "dxgi,d3d11,winemetal=b", "--debugmsg", "-all,+loaddll",
-            "--cx-app", "Z:" + executable.as_posix(),
-        ], env=env, capture_output=True, text=True, timeout=45)
-        output = result.stdout + result.stderr
-        (report / "probe.log").write_text(output)
-        verify_loaded_dxmt(output, prefix, ("d3d11.dll", "dxgi.dll", "winemetal.dll"))
-        if result.returncode or "presentation_probe_passed" not in output:
-            raise RuntimeError(f"Present/resize probe failed ({result.returncode}); inspect {report}")
-        files = list(report.glob("*.events.csv"))
-        if len(files) != 1:
-            raise RuntimeError(f"Expected one event timeline; inspect {report}")
-        lines = files[0].read_text().splitlines()
-        # Queue contention may drop optional diagnostic records. Require actual
-        # phases from the real DLL, not an exact count or timing threshold.
-        rows = list(csv.DictReader(line for line in lines if not line.startswith("#")))
-        required = {"present", "present_mutex", "present_boundary", "sync_frame",
-                    "window_state", "resize_buffers", "wait_gpu_idle", "wait_cpu_fence"}
-        if not required.issubset({row["event"] for row in rows}):
-            raise RuntimeError(f"Present probe did not record required phases; inspect {report}")
-        if not any(line.startswith("# dropped_samples=") for line in lines):
-            raise RuntimeError(f"Presentation timeline did not close cleanly; inspect {report}")
-        if staged_hashes() != expected:
-            raise RuntimeError("Selected DXMT changed during presentation probe")
-        print("Present/resize and event timeline check passed:", report, flush=True)
-    finally:
-        stop_bottle(BOTTLE)
+    for mode in ("full", "light", "off"):
+        report = LAB / "probe-logs" / ("presentation-" + mode + "-" + str(time.time_ns()))
+        report.mkdir(parents=True, mode=0o700)
+        env = environment()
+        env["DXMT_FRAME_REPORT_DIR"] = "" if mode == "off" else "Z:" + report.as_posix()
+        env["DXMT_REPORT_MODE"] = mode
+        try:
+            result = subprocess.run([
+                str(RUNTIME / "bin/wine"), "--bottle", BOTTLE, "--no-gui", "--no-update",
+                "--dll", "dxgi,d3d11,winemetal=b", "--debugmsg", "-all,+loaddll",
+                "--cx-app", "Z:" + executable.as_posix(),
+            ], env=env, capture_output=True, text=True, timeout=45)
+            output = result.stdout + result.stderr
+            (report / "probe.log").write_text(output)
+            verify_loaded_dxmt(output, prefix, ("d3d11.dll", "dxgi.dll", "winemetal.dll"))
+            if result.returncode or "presentation_probe_passed" not in output:
+                raise RuntimeError(f"Present/resize probe failed ({result.returncode}); inspect {report}")
+            if mode == "off":
+                if list(report.glob("*.csv")):
+                    raise RuntimeError("Off mode unexpectedly wrote telemetry")
+            else:
+                files = list(report.glob("*.events.csv"))
+                if len(files) != 1:
+                    raise RuntimeError(f"Expected one event timeline; inspect {report}")
+                lines = files[0].read_text().splitlines()
+                rows = list(csv.DictReader(line for line in lines if not line.startswith("#")))
+                required = {"present", "window_state", "resize_buffers", "wait_gpu_idle", "wait_cpu_fence"}
+                if mode == "full": required |= {"present_mutex", "present_boundary", "sync_frame"}
+                kinds = {row["event"] for row in rows}
+                if not required.issubset(kinds):
+                    raise RuntimeError(f"Present probe did not record required phases; inspect {report}")
+                if mode == "light" and kinds & {"present_mutex", "prepare_flush", "commit", "present_boundary", "sync_frame"}:
+                    raise RuntimeError("Light mode unexpectedly recorded full hot-path events")
+                if not any(line.startswith("# dropped_samples=") for line in lines):
+                    raise RuntimeError(f"Presentation timeline did not close cleanly; inspect {report}")
+                gpu_files = list(report.glob("*.gpu.csv"))
+                if len(gpu_files) != 1: raise RuntimeError("Missing GPU completion data")
+                gpu_lines = gpu_files[0].read_text().splitlines()
+                gpu_rows = list(csv.DictReader(line for line in gpu_lines if not line.startswith("#")))
+                if not any(int(row["status"]) == 4 and 0 < int(row["gpu_start_ns"]) <= int(row["gpu_end_ns"]) for row in gpu_rows):
+                    raise RuntimeError("GPU completion timestamps were not available")
+                if not any(int(row["memory_sampled"]) and int(row["allocated_bytes"]) > 0 for row in gpu_rows):
+                    raise RuntimeError("Metal allocation samples were not available")
+                if not any(line.startswith("# dropped_samples=") for line in gpu_lines):
+                    raise RuntimeError("GPU timeline did not close cleanly")
+            if staged_hashes() != expected:
+                raise RuntimeError("Selected DXMT changed during presentation probe")
+            print("Present/resize logging mode check passed:", mode, report, flush=True)
+        finally:
+            stop_bottle(BOTTLE)
 
 
 def main() -> None:

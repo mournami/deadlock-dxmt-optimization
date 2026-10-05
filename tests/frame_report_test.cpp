@@ -88,6 +88,14 @@ int main(int argc, char **argv) {
   assert(event.duration_ns >= 1000000 && event.thread_id == 9 && event.detail == 10 && event.object_id == 11);
   assert(!events.pop(event));
 
+  FrameEventRecorder light_events(ReportMode::Light);
+  {
+    FrameEventScope hot(&light_events, FrameEvent::PresentMutex, 1);
+    assert(hot.startNS() == 0);
+  }
+  assert(!light_events.pop(event));
+  { FrameEventScope present(&light_events, FrameEvent::Present, 1); }
+  assert(light_events.pop(event) && event.event == FrameEvent::Present);
   const std::filesystem::path root(argv[1]);
   const auto csv = root / "frame-report-test.csv";
   {
@@ -109,13 +117,17 @@ int main(int argc, char **argv) {
     report.stop();
   }
   std::ifstream file(csv);
-  std::string header, first, second, footer;
+  std::string header, first, second, footer, mode;
   std::getline(file, header);
+  std::getline(file, mode);
   std::getline(file, first);
   std::getline(file, second);
   std::getline(file, footer);
   assert(header.starts_with("frame,boundary_interval_ns,"));
-  assert(first == "0,0,500000,100000,200000,4,0,0,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0");
+  assert(mode == "# report_mode=full");
+  std::string expected_first = "0,0,500000,100000,200000,4,0,0,7";
+  for (size_t i = 1; i < kFrameCounterCount; ++i) expected_first += ",0";
+  assert(first == expected_first);
   assert(second.starts_with("1,"));
   assert(std::stoull(second.substr(2)) >= 1000000);
   assert(footer == "# dropped_samples=0");
@@ -132,6 +144,9 @@ int main(int argc, char **argv) {
   assert(!disabled.enabled());
   disabled.submit({});
   disabled.stop();
+  const auto off_csv = root / "off.csv";
+  FrameReport<> off(off_csv, ReportMode::Off);
+  assert(!off.enabled() && !std::filesystem::exists(off_csv));
 
   // A saturated diagnostic queue must remain bounded and terminate cleanly.
   const auto stress = root / "frame-report-stress.csv";
@@ -145,6 +160,10 @@ int main(int argc, char **argv) {
       for (uint64_t i = 0; i < 100000; ++i)
         report.eventRecorder()->submit({FrameEvent::Present, i, i + 100, i + 200, 1, 2, i});
     });
+    std::thread gpu_caller([&]() {
+      for (uint64_t i = 0; i < 100000; ++i)
+        report.submitGPU({i, i + 1, 100, 200, 50, 70, 4, 4096, 1});
+    });
     for (uint64_t i = 0; i < 100000; ++i) {
       FrameReportSample sample;
       sample.frame = i;
@@ -152,6 +171,7 @@ int main(int argc, char **argv) {
     }
     encoder.join();
     event_caller.join();
+    gpu_caller.join();
   }
   std::ifstream stress_file(stress);
   std::string line;
@@ -159,9 +179,22 @@ int main(int argc, char **argv) {
   while (std::getline(stress_file, line)) {
     if (line.starts_with("# dropped_samples="))
       dropped = std::stoull(line.substr(18));
-    else if (!line.starts_with("frame,")) {
+    else if (!line.starts_with("frame,") && !line.starts_with("#")) {
       const auto frame = std::stoull(line);
       if (rows) assert(frame > previous);
+      previous = frame;
+      ++rows;
+    }
+  }
+  assert(rows + dropped == 100000);
+  std::ifstream gpu_file(root / "frame-report-stress.gpu.csv");
+  previous = rows = dropped = 0;
+  while (std::getline(gpu_file, line)) {
+    if (line.starts_with("# dropped_samples=")) dropped = std::stoull(line.substr(18));
+    else if (!line.starts_with("frame,") && !line.starts_with("#")) {
+      const auto frame = std::stoull(line);
+      if (rows) assert(frame > previous);
+      assert(line == std::to_string(frame) + "," + std::to_string(frame + 1) + ",100,200,50,70,4,4096,1");
       previous = frame;
       ++rows;
     }

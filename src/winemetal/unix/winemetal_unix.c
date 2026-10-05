@@ -1,4 +1,5 @@
 #include <stdatomic.h>
+#include <math.h>
 #include <dlfcn.h>
 #import <Cocoa/Cocoa.h>
 #import <ColorSync/ColorSync.h>
@@ -128,6 +129,30 @@ static NTSTATUS
 _MTLCommandBuffer_status(void *obj) {
   struct unixcall_generic_obj_uint64_ret *params = obj;
   params->ret = [(id<MTLCommandBuffer>)params->handle status];
+  return STATUS_SUCCESS;
+}
+
+static uint64_t
+diagnosticTimeNS(double value) {
+  if (!isfinite(value) || value <= 0 || value >= (double)UINT64_MAX / 1e9) return 0;
+  return (uint64_t)(value * 1e9);
+}
+
+static NTSTATUS
+_MTLCommandBuffer_completionStats(void *obj) {
+  struct unixcall_command_buffer_completion *params = obj;
+  id<MTLCommandBuffer> buffer = (id<MTLCommandBuffer>)params->handle;
+  params->ret = (struct WMTCommandBufferCompletion){0};
+  params->ret.status = buffer.status;
+  // Caller uses this after its EXISTING completion wait. Never add a wait or
+  // completion handler merely to collect telemetry.
+  if (params->ret.status == MTLCommandBufferStatusCompleted) {
+    params->ret.gpu_start_ns = diagnosticTimeNS(buffer.GPUStartTime);
+    params->ret.gpu_end_ns = diagnosticTimeNS(buffer.GPUEndTime);
+    params->ret.kernel_start_ns = diagnosticTimeNS(buffer.kernelStartTime);
+    params->ret.kernel_end_ns = diagnosticTimeNS(buffer.kernelEndTime);
+  }
+  if (params->sample_memory) params->ret.allocated_bytes = buffer.device.currentAllocatedSize;
   return STATUS_SUCCESS;
 }
 
@@ -2765,6 +2790,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_newSharedEventWithMachPort,
     &_MTLDevice_registryID,
     &_MTLSharedEvent_waitUntilSignaledValue,
+    &_MTLCommandBuffer_completionStats,
 };
 
 #ifndef DXMT_NATIVE
@@ -2896,5 +2922,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newSharedEventWithMachPort,
     &_MTLDevice_registryID,
     &_MTLSharedEvent_waitUntilSignaledValue,
+    &_MTLCommandBuffer_completionStats,
 };
 #endif

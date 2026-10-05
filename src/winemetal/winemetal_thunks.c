@@ -1118,3 +1118,12 @@ MTLSharedEvent_waitUntilSignaledValue(obj_handle_t event, uint64_t value, uint64
   UNIX_CALL(126, &params);
   return params.ret_timeout;
 }
+
+WINEMETAL_API struct WMTCommandBufferCompletion
+MTLCommandBuffer_completionStats(obj_handle_t cmdbuf, bool sample_memory) {
+  struct unixcall_command_buffer_completion params = {0};
+  params.handle = cmdbuf;
+  params.sample_memory = sample_memory;
+  UNIX_CALL(127, &params);
+  return params.ret;
+}

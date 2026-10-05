@@ -92,6 +92,17 @@ class ReadyBuilds(unittest.TestCase):
             process.assert_not_called()
             launch.assert_not_called()
 
+    def test_reporting_preferences_do_not_start_apps_and_default_to_light(self):
+        with patch.dict(runner.os.environ,{},clear=True):
+            self.assertEqual(runner.reporting_mode(),"light")
+            with patch.object(runner.subprocess,"run") as process:
+                runner.set_reporting_mode("off")
+                self.assertEqual(runner.reporting_mode(),"off")
+                self.assertEqual(runner.reporting_mode("full"),"full")
+                process.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError,"report mode"):
+                runner.reporting_mode("invalid")
+
     def test_extended_cpu_and_encoder_reports_join_by_frame(self):
         cpu = self.root / "game.csv"
         with cpu.open("w") as out:

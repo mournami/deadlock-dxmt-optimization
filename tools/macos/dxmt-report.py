@@ -17,6 +17,10 @@ DIAGNOSTIC_FIELDS = ("om_blend_calls", "om_blend_redundant", "om_depth_calls", "
     "om_blend_commands", "om_depth_commands", "layer_query_ns", "layer_wait_ns",
     "present_pipeline_build_ns", "layer_update_ns", "display_changes", "present_pipeline_builds")
 SCHEDULER_FIELDS = ("shader_workers", "shader_workers_active", "shader_jobs_queued", "shader_worker_limit")
+SHADER_CREATE_FIELDS = ("shader_create_calls", "shader_create_cache_hits", "shader_create_misses",
+                        "shader_create_ns", "shader_bytecode_bytes")
+GPU_FIELDS = ("frame", "chunk", "gpu_start_ns", "gpu_end_ns", "kernel_start_ns", "kernel_end_ns",
+              "status", "allocated_bytes", "memory_sampled")
 EVENT_FIELDS = ("event", "frame", "start_ns", "duration_ns", "thread_id", "object_id", "detail")
 EVENT_KINDS = {"present", "present_mutex", "prepare_flush", "commit", "present_boundary", "sync_frame",
                "window_state", "resize_buffers", "resize_target", "fullscreen", "apply_layer",
@@ -50,7 +54,8 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         raise ValueError("Negative dropped sample count")
     reader = csv.DictReader(io.StringIO("\n".join(line for line in lines if not line.startswith("#"))))
     columns = tuple(reader.fieldnames or ())
-    if columns not in (FIELDS, FIELDS + DIAGNOSTIC_FIELDS, FIELDS + DIAGNOSTIC_FIELDS + SCHEDULER_FIELDS):
+    if columns not in (FIELDS, FIELDS + DIAGNOSTIC_FIELDS, FIELDS + DIAGNOSTIC_FIELDS + SCHEDULER_FIELDS,
+                       FIELDS + DIAGNOSTIC_FIELDS + SCHEDULER_FIELDS + SHADER_CREATE_FIELDS):
         raise ValueError("Unsupported frame report header")
     rows = []
     previous = None
@@ -104,8 +109,14 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         "frames_over_33ms": sum(value > 33.333 for value in intervals),
         "frames_over_100ms": sum(value > 100 for value in intervals),
     }
+    mode = next((line.split("=", 1)[1] for line in lines if line.startswith("# report_mode=")), "legacy")
+    if mode not in ("legacy", "full", "light"):
+        raise ValueError("Unknown report mode")
+    result["report_mode"] = mode
     worst = heapq.nlargest(10, rows, key=lambda row: row["boundary_interval_ns"])
-    timing_fields = FIELDS[2:5] + tuple(key for key in DIAGNOSTIC_FIELDS if key.endswith("_ns") and key in columns)
+    timing_fields = FIELDS[2:5] + tuple(key for key in DIAGNOSTIC_FIELDS + SHADER_CREATE_FIELDS
+                                     if key.endswith("_ns") and key in columns and
+                                     (key in SHADER_CREATE_FIELDS or mode != "light"))
     result["longest_intervals"] = [{
         "frame": row["frame"],
         "recorded_elapsed_seconds": round(row["recorded_elapsed_ns"] / 1e9, 6),
@@ -117,7 +128,7 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         "CPU interval timings and encoder samples are shown separately, not added as a causal breakdown. "
         "Recorded elapsed time omits lost intervals; scene/focus events are not inferred."
     )
-    if columns != FIELDS:
+    if columns != FIELDS and mode != "light":
         result["cpu_diagnostics"] = {
             "scope": "Immediate/deferred recording calls between CPU boundaries; not GPU execution counts",
             "counts": {key: sum(row[key] for row in rows) for key in DIAGNOSTIC_FIELDS if not key.endswith("_ns")},
@@ -135,6 +146,12 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         for interval in result["longest_intervals"]:
             row = next(row for row in worst if row["frame"] == interval["frame"])
             interval["shader_scheduler_snapshot"] = {key: row[key] for key in SCHEDULER_FIELDS}
+    if all(key in columns for key in SHADER_CREATE_FIELDS):
+        result["cpu_shader_creation"] = {
+            "scope": "CPU shader bytecode hashing/parsing and in-process lookup; NOT persistent IR cache hits",
+            "counts": {key: sum(row[key] for row in rows) for key in SHADER_CREATE_FIELDS if not key.endswith("_ns")},
+            "total_ms": round(sum(row["shader_create_ns"] for row in rows) / 1e6, 4),
+            "max_interval_ms": round(max(row["shader_create_ns"] for row in rows) / 1e6, 4)}
     encoder = path.with_name(path.stem + ".encoder.csv")
     if encoder.is_file():
         result["encoder_diagnostics"] = summarize_encoder(
@@ -151,6 +168,9 @@ def summarize(path: Path, skip_seconds: float = 5, allow_incomplete: bool = Fals
         selected = result["dxgi_events"].pop("selected_frame_events")
         for interval in result["longest_intervals"]:
             interval["events_near_cpu_frame"] = selected.get(str(interval["frame"]), [])
+    gpu = path.with_name(path.stem + ".gpu.csv")
+    if gpu.is_file():
+        result["gpu_diagnostics"] = summarize_gpu(gpu, rows[0]["frame"], rows[-1]["frame"], allow_incomplete)
     return result
 
 
@@ -276,6 +296,54 @@ def summarize_events(path: Path, first_frame: int, last_frame: int, allow_incomp
         "sampled_window_transitions": transitions[:100], "omitted_window_transitions": max(0, len(transitions) - 100),
         "window_note": "Foreground/minimized/visible sampled at Present only; a transition may be detected late or missed between calls. No exact Alt+Tab timestamp.",
         "selected_frame_events": selected,
+    }
+
+
+def summarize_gpu(path: Path, first_frame: int, last_frame: int, allow_incomplete: bool) -> dict:
+    lines, ignored_tail = report_lines(path, allow_incomplete)
+    dropped = next((int(line.split("=", 1)[1]) for line in lines if line.startswith("# dropped_samples=")), None)
+    if dropped is not None and dropped < 0:
+        raise ValueError("Negative GPU dropped sample count")
+    reader = csv.DictReader(io.StringIO("\n".join(line for line in lines if not line.startswith("#"))))
+    if tuple(reader.fieldnames or ()) != GPU_FIELDS:
+        raise ValueError("Unsupported GPU report header")
+    samples = []
+    previous = None
+    for row in reader:
+        if None in row or any(row.get(key) is None for key in GPU_FIELDS):
+            raise ValueError("Malformed GPU report row")
+        sample = {key: int(row[key]) for key in GPU_FIELDS}
+        if any(value < 0 for value in sample.values()):
+            raise ValueError("Negative GPU report value")
+        if previous is not None and sample["chunk"] <= previous:
+            raise ValueError("GPU chunk IDs are not increasing")
+        previous = sample["chunk"]
+        for prefix in ("gpu", "kernel"):
+            start, end = sample[prefix + "_start_ns"], sample[prefix + "_end_ns"]
+            if (start and end and end < start):
+                raise ValueError("Reversed GPU timing")
+        if first_frame <= sample["frame"] <= last_frame:
+            samples.append(sample)
+    if (dropped is None or dropped > 0) and not allow_incomplete:
+        raise ValueError("GPU report is incomplete or lost samples")
+    valid = [s for s in samples if s["status"] == 4 and 0 < s["gpu_start_ns"] <= s["gpu_end_ns"]]
+    intervals = [(s["gpu_end_ns"] - s["gpu_start_ns"]) / 1e6 for s in valid]
+    memory = [s for s in samples if s["memory_sampled"]]
+    return {
+        "file": str(path), "samples": len(samples), "valid_timing_samples": len(valid),
+        "unavailable_timing_samples": len(samples) - len(valid), "dropped_samples": dropped,
+        "ignored_unterminated_tail": ignored_tail,
+        "scope": "Completed command-buffer GPU execution span, not display FPS/GPU utilization. Overlapping spans must not be added.",
+        "mean_gpu_ms": round(statistics.mean(intervals), 4) if intervals else None,
+        "max_gpu_ms": round(max(intervals), 4) if intervals else None,
+        "longest_buffers": [{"frame": s["frame"], "chunk": s["chunk"],
+                             "gpu_ms": round((s["gpu_end_ns"] - s["gpu_start_ns"]) / 1e6, 4),
+                             "kernel_ms": round((s["kernel_end_ns"] - s["kernel_start_ns"]) / 1e6, 4)
+                                          if 0 < s["kernel_start_ns"] <= s["kernel_end_ns"] else None}
+                            for s in heapq.nlargest(10, valid, key=lambda s: s["gpu_end_ns"] - s["gpu_start_ns"])],
+        "metal_memory_samples": len(memory),
+        "metal_allocated_max_bytes": max((s["allocated_bytes"] for s in memory), default=None),
+        "memory_note": "MTLDevice resource allocations only; not whole process RSS, system pressure or evidence of a leak.",
     }
 
 

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import signal
+import tempfile
 
 SPEC = importlib.util.spec_from_file_location("dxmt_lab", Path(__file__).with_name("dxmt-lab.py"))
 lab = importlib.util.module_from_spec(SPEC)
@@ -29,6 +30,29 @@ def check_prefix() -> None:
 
 configure = lab.configure
 
+def reporting_mode(override: str | None = None) -> str:
+    path = lab.LAB / "reporting.json"
+    value = override or os.environ.get("DXMT_REPORT_MODE")
+    if value is None and path.is_file():
+        value = json.loads(path.read_text()).get("mode")
+    mode = value or "light"
+    if mode not in ("off", "light", "full"):
+        raise RuntimeError("DXMT report mode must be off, light or full")
+    return mode
+
+def set_reporting_mode(mode: str) -> None:
+    mode = reporting_mode(mode)
+    lab.LAB.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(mode="w", dir=lab.LAB, delete=False) as stream:
+        pending = Path(stream.name)
+        json.dump({"mode": mode}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        pending.replace(lab.LAB / "reporting.json")
+    finally:
+        pending.unlink(missing_ok=True)
+    print("Режим логов для следующего запуска:", mode)
 
 def prepare() -> None:
     lab.private_runtime()
@@ -102,7 +126,8 @@ def selected_build(variant: str, require_ready: bool = False) -> Path:
     return source
 
 
-def run(variant: str, require_ready: bool = False) -> None:
+def run(variant: str, require_ready: bool = False, report_mode_override: str | None = None) -> None:
+    mode = reporting_mode(report_mode_override)
     # Hold the common lock through the launcher lifetime. `stop` intentionally
     # does not take it, so the user can end their own private test.
     with lab.operation_lock():
@@ -132,21 +157,23 @@ def run(variant: str, require_ready: bool = False) -> None:
             "source_files_sha256": build_record.get("source_files_sha256", {}),
             "loaded_dxmt_sha256": lab.staged_hashes(), "om_state_dedup": variant == "experiment",
             "shader_workers_requested": 4 if variant == "experiment" else 0,
-            "dxgi_events": bool(build_record.get("presentation_tested")),
-            "metric": "CPU/encoder wall time; not display FPS or input latency",
+            "dxgi_events": mode != "off" and bool(build_record.get("presentation_tested")),
+            "report_mode": mode,
+            "metric": "CPU/encoder/GPU command spans; not display FPS or input latency",
         }, indent=2) + "\n")
         if (PREFIX / "dosdevices/z:").resolve() != Path("/"):
             raise RuntimeError("The test bottle has no Z: mapping to the Mac filesystem")
-        wine_report = "Z:" + str(report_dir)
+        wine_report = "" if mode == "off" else "Z:" + str(report_dir)
         dedup = "1" if variant == "experiment" else "0"
         workers = "4" if variant == "experiment" else "0"
         configure(PREFIX / "cxbottle.conf", {"EnvironmentVariables": {
             "DXMT_FRAME_REPORT_DIR": wine_report, "DXMT_OM_STATE_DEDUP": dedup,
-            "DXMT_SHADER_WORKERS": workers}})
+            "DXMT_SHADER_WORKERS": workers, "DXMT_REPORT_MODE": mode}})
         env = lab.environment()
         env["DXMT_FRAME_REPORT_DIR"] = wine_report
         env["DXMT_OM_STATE_DEDUP"] = dedup
         env["DXMT_SHADER_WORKERS"] = workers
+        env["DXMT_REPORT_MODE"] = mode
         env["MTL_HUD_ENABLED"] = "1"
         env["WINEDEBUG"] = "-all"
         print("Starting private Windows Steam / Deadlock (DX11).", flush=True)
@@ -175,15 +202,19 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("prepare")
     sub.add_parser("stop")
+    logging = sub.add_parser("logging")
+    logging.add_argument("--mode", choices=("off", "light", "full"), required=True)
     launch = sub.add_parser("run")
     launch.add_argument("--variant", choices=("baseline", "experiment"), default="experiment")
+    launch.add_argument("--report-mode", choices=("off", "light", "full"))
     args = parser.parse_args()
     try:
         if args.command == "prepare":
             with lab.operation_lock(): prepare()
             print("Private Steam test prefix prepared")
         elif args.command == "stop": stop()
-        else: run(args.variant)
+        elif args.command == "logging": set_reporting_mode(args.mode)
+        else: run(args.variant, report_mode_override=args.report_mode)
     except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
         parser.exit(1, str(error) + "\n")
 

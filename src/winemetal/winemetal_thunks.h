@@ -30,6 +30,14 @@ struct unixcall_generic_obj_uint64_ret {
   uint64_t ret;
 };
 
+// Pointer-free, identically laid out in PE32/PE64 and the native thunk tables.
+struct unixcall_command_buffer_completion {
+  obj_handle_t handle;
+  uint64_t sample_memory;
+  struct WMTCommandBufferCompletion ret;
+};
+typedef char completion_thunk_size_check[(sizeof(struct unixcall_command_buffer_completion) == 64) ? 1 : -1];
+
 struct unixcall_generic_obj_uint64_noret {
   obj_handle_t handle;
   uint64_t arg;

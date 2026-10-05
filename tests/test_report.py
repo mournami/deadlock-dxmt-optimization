@@ -183,4 +183,46 @@ class PauseAnalysis(unittest.TestCase):
         self.assertEqual(result["longest_present_gaps"][0]["frame"], 3)
         self.assertEqual(result["longest_present_gaps"][0]["gap_ms"], .0003)
 
+    def test_light_cpu_marks_disabled_counters_and_reports_shader_work(self):
+        fields=report.FIELDS+report.DIAGNOSTIC_FIELDS+report.SCHEDULER_FIELDS+report.SHADER_CREATE_FIELDS
+        with self.cpu.open("w") as out:
+            writer=csv.DictWriter(out,fieldnames=fields);writer.writeheader()
+            out.write("# report_mode=light\n")
+            for frame in range(200):
+                row=dict.fromkeys(fields,0)
+                row.update(frame=frame,boundary_interval_ns=1000000,shader_create_calls=2,
+                           shader_create_cache_hits=1,shader_create_misses=1,shader_create_ns=2000000)
+                writer.writerow(row)
+            out.write("# dropped_samples=0\n")
+        result=report.summarize(self.cpu,skip_seconds=0)
+        self.assertEqual(result["report_mode"],"light")
+        self.assertNotIn("cpu_diagnostics",result)
+        self.assertEqual(result["cpu_shader_creation"]["counts"]["shader_create_cache_hits"],200)
+        self.assertEqual(result["cpu_shader_creation"]["total_ms"],400)
+        self.assertEqual(result["longest_intervals"][0]["cpu_interval_timings_ms"]["shader_create"],2)
+
+    def test_gpu_completion_spans_unavailable_times_memory_and_losses(self):
+        gpu=self.root/"game.gpu.csv"
+        with gpu.open("w") as out:
+            writer=csv.writer(out);writer.writerow(report.GPU_FIELDS)
+            writer.writerows([(1,1,1000000,3000000,100000,200000,4,4096,1),
+                             (1,2,2000000,5000000,0,0,4,0,0),
+                             (2,3,0,0,0,0,5,0,0)])
+            out.write("# dropped_samples=0\n")
+        result=report.summarize_gpu(gpu,0,10,False)
+        self.assertEqual(result["valid_timing_samples"],2)
+        self.assertEqual(result["unavailable_timing_samples"],1)
+        self.assertEqual(result["mean_gpu_ms"],2.5)
+        self.assertEqual(result["metal_allocated_max_bytes"],4096)
+        self.assertEqual(result["longest_buffers"][0]["chunk"],2)
+        with gpu.open("w") as out:
+            writer=csv.writer(out);writer.writerow(report.GPU_FIELDS)
+            writer.writerow((1,1,300,100,0,0,4,0,0))
+        with self.assertRaisesRegex(ValueError,"Reversed GPU"):
+            report.summarize_gpu(gpu,0,10,True)
+        gpu.write_text(",".join(report.GPU_FIELDS)+"\n1,2,100")
+        result=report.summarize_gpu(gpu,0,10,True)
+        self.assertEqual(result["samples"],0)
+        self.assertTrue(result["ignored_unterminated_tail"])
+
 if __name__ == "__main__": unittest.main()

@@ -1,8 +1,11 @@
 #pragma once
 
+#include "dxmt_report_policy.hpp"
+
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 
 namespace dxmt {
@@ -64,19 +67,24 @@ public:
 class FrameEventRecorder {
   FrameEventQueue<512> queue_;
   std::atomic<uint64_t> dropped_{0};
-  std::atomic<uint64_t> *wake_;
+  ReportMode mode_;
 public:
-  explicit FrameEventRecorder(std::atomic<uint64_t> *wake = nullptr) : wake_(wake) {}
+  explicit FrameEventRecorder(ReportMode mode = ReportMode::Full) : mode_(mode) {}
+  bool allows(FrameEvent event) const {
+    if (mode_ == ReportMode::Off) return false;
+    if (mode_ == ReportMode::Full) return true;
+    switch (event) {
+    case FrameEvent::PresentMutex: case FrameEvent::PrepareFlush:
+    case FrameEvent::Commit: case FrameEvent::PresentBoundary: case FrameEvent::SyncFrame:
+      return false;
+    default: return true;
+    }
+  }
   void submit(const FrameEventSample &sample) {
     if (!queue_.push(sample)) {
       dropped_.fetch_add(1, std::memory_order_relaxed);
     }
-    // pop() can fail while a producer is checking a full queue. Wake even on
-    // a drop so pending records cannot be stranded behind that contention.
-    if (wake_) {
-      wake_->fetch_add(1, std::memory_order_release);
-      wake_->notify_one();
-    }
+    // The writer polls in batches. No producer notification or OS wakeup.
   }
   bool pop(FrameEventSample &sample) { return queue_.pop(sample); }
   uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
@@ -95,11 +103,13 @@ class FrameEventScope {
 public:
   FrameEventScope(FrameEventRecorder *recorder, FrameEvent event, uint64_t frame,
                   uint64_t thread_id = 0, uint64_t detail = 0, uint64_t object_id = 0)
-      : recorder_(recorder), sample_{event, frame, recorder ? frameEventTimeNS() : 0, 0,
+      : recorder_(recorder && recorder->allows(event) ? recorder : nullptr),
+        sample_{event, frame, recorder_ ? frameEventTimeNS() : 0, 0,
                                     thread_id, object_id, detail} {}
   FrameEventScope(const FrameEventScope &) = delete;
   FrameEventScope &operator=(const FrameEventScope &) = delete;
   ~FrameEventScope() { finish(); }
+  uint64_t startNS() const { return sample_.start_ns; }
   void setDetail(uint64_t detail) { sample_.detail = detail; }
   void finish() {
     if (!recorder_) return;

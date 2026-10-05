@@ -137,7 +137,9 @@ def build(variant: str, jobs: int) -> None:
         # Apply the identical recorder to both builds. Keep the upstream HUD
         # formatting and aggregation in the baseline so those are the only
         # performance differences being tested.
-        for relative in ("src/dxmt/dxmt_frame_report.hpp", "src/dxmt/dxmt_frame_events.hpp", "src/dxmt/dxmt_command_queue.cpp",
+        for relative in ("src/dxmt/dxmt_frame_report.hpp", "src/dxmt/dxmt_frame_events.hpp", "src/dxmt/dxmt_report_policy.hpp",
+                         "src/winemetal/Metal.hpp", "src/winemetal/winemetal.h", "src/winemetal/winemetal_thunks.h",
+                         "src/winemetal/winemetal_thunks.c", "src/winemetal/unix/winemetal_unix.c", "src/dxmt/dxmt_command_queue.cpp",
                          "src/dxmt/dxmt_presenter.cpp", "src/dxmt/dxmt_presenter.hpp", "src/dxmt/dxmt_context.cpp",
                          "src/dxmt/dxmt_context.hpp", "src/dxmt/dxmt_tasks.hpp", "src/d3d11/d3d11_device.cpp",
                          "src/d3d11/d3d11_device.hpp", "src/d3d11/d3d11_pipeline_cache.hpp",
@@ -179,7 +181,7 @@ def build(variant: str, jobs: int) -> None:
         swapchain = swapchain.replace("presenter->synchronizeLayerProperties()",
             "presenter->synchronizeLayerProperties(cmd_queue.FrameProfiler())")
         current_swapchain = (SOURCE / "src/d3d11/d3d11_swapchain.cpp").read_text()
-        start = "    if (auto profile = cmd_queue.FrameProfiler()) {"
+        start = "    if (auto profile = cmd_queue.LightFrameProfiler()) {"
         end = "    auto chunk = cmd_queue.CurrentChunk();"
         queue_marker = "    auto &cmd_queue = device_->GetDXMTDevice().queue();"
         if swapchain.count(queue_marker) != 1 or current_swapchain.count(start) != 1:
@@ -218,7 +220,9 @@ def build(variant: str, jobs: int) -> None:
         "directx_headers_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE / "include/native/directx", text=True).strip(),
         "source_files_sha256": {
             relative: hashlib.sha256((source / relative).read_bytes()).hexdigest()
-            for relative in ("src/dxmt/dxmt_frame_report.hpp", "src/dxmt/dxmt_frame_events.hpp", "src/dxmt/dxmt_command_queue.cpp",
+            for relative in ("src/dxmt/dxmt_frame_report.hpp", "src/dxmt/dxmt_frame_events.hpp", "src/dxmt/dxmt_report_policy.hpp",
+                             "src/winemetal/Metal.hpp", "src/winemetal/winemetal.h", "src/winemetal/winemetal_thunks.h",
+                             "src/winemetal/winemetal_thunks.c", "src/winemetal/unix/winemetal_unix.c", "src/dxmt/dxmt_command_queue.cpp",
                              "src/dxmt/dxmt_command_queue.hpp", "src/d3d11/d3d11_swapchain.cpp",
                              "src/airconv/shaders/air_tessellation.metal", "src/d3d11/d3d11_context_impl.cpp",
                              "src/dxmt/dxmt_presenter.cpp", "src/dxmt/dxmt_presenter.hpp", "src/dxmt/dxmt_context.cpp",
@@ -228,6 +232,7 @@ def build(variant: str, jobs: int) -> None:
         },
         "baseline_includes_identical_recorder": variant == "baseline",
         "dxgi_events": variant == "experiment",
+        "report_modes": ["off", "light", "full"],
         "binary_sha256": {relative: hashlib.sha256((install / relative).read_bytes()).hexdigest()
                           for relative in ("x86_64-windows/d3d11.dll", "x86_64-windows/dxgi.dll",
                                            "x86_64-windows/winemetal.dll", "x86_64-unix/winemetal.so")},

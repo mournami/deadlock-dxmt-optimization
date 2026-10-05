@@ -102,6 +102,14 @@ enum WMTCommandBufferStatus : uint64_t {
 
 WINEMETAL_API enum WMTCommandBufferStatus MTLCommandBuffer_status(obj_handle_t cmdbuf);
 
+struct WMTCommandBufferCompletion {
+  uint64_t status;
+  uint64_t gpu_start_ns, gpu_end_ns, kernel_start_ns, kernel_end_ns;
+  uint64_t allocated_bytes;
+};
+WINEMETAL_API struct WMTCommandBufferCompletion
+MTLCommandBuffer_completionStats(obj_handle_t cmdbuf, bool sample_memory);
+
 WINEMETAL_API obj_handle_t MTLDevice_newSharedEvent(obj_handle_t device);
 
 WINEMETAL_API uint64_t MTLSharedEvent_signaledValue(obj_handle_t event);
