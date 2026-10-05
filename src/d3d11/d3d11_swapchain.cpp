@@ -640,6 +640,9 @@ public:
   };
 
   void UpdateStatistics(const FrameStatisticsContainer& statistics, uint64_t frame_id) {
+#ifdef DXMT_DEBUG
+    // HUDState::printLine is disabled in release builds. Do not format strings
+    // or read the cross-thread HUD statistics when there is no consumer.
     hud.begin();
     auto &frame = statistics.at(frame_id - 1); // show the previous one frame statistics
     auto &average = statistics.average();
@@ -718,6 +721,7 @@ public:
       }
     }
     hud.end();
+#endif
   }
 
   BOOL STDMETHODCALLTYPE IsTemporaryMonoSupported() final { return FALSE; };

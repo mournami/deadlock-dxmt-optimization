@@ -92,15 +92,21 @@ public:
       chunk_id,
       frame_
     );
+#ifdef DXMT_DEBUG
     auto& statistics = enc.currentFrameStatistics();
     auto t0 = clock::now();
+#endif
     list_enc.execute(enc);
     attached_cmdbuf = cmdbuf;
+#ifdef DXMT_DEBUG
     auto t1 = clock::now();
+#endif
     visibility_readback = enc.flushCommands(cmdbuf, chunk_id, chunk_event_id);
+#ifdef DXMT_DEBUG
     auto t2 = clock::now();
     statistics.encode_prepare_interval += (t1 - t0);
     statistics.encode_flush_interval += (t2 - t1);
+#endif
   };
 
   uint64_t chunk_id;
@@ -252,7 +258,10 @@ public:
       sample.resource_sync_wait_ns =
           std::chrono::duration_cast<std::chrono::nanoseconds>(frame.sync_interval).count();
     }
+#ifdef DXMT_DEBUG
+    // Aggregates are only consumed by the debug HUD, not the frame report.
     statistics.compute(frame_count);
+#endif
     frame_count++;
     statistics.at(frame_count).reset();
     // After present N-th frame (N starts from 1), wait for (N - max_latency)-th frame to finish rendering 
