@@ -60,14 +60,20 @@ Presenter::changeHDRMetadata(const WMTHDRMetadata *metadata) {
 }
 
 Presenter::PresentState
-Presenter::synchronizeLayerProperties() {
+Presenter::synchronizeLayerProperties(FrameCounters *profile) {
   uint64_t display_setting_version = 0;
+  using profile_clock = std::chrono::steady_clock;
+  const auto query_start = profile ? profile_clock::now() : profile_clock::time_point{};
 
   WMTQueryDisplaySettingForLayer(
       layer_.handle, &display_setting_version, &display_colorspace_, &display_hdr_metadata_, &display_edr_value_
   );
+  if (profile)
+    profile->add(FrameCounter::LayerQueryNS,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(profile_clock::now() - query_start).count());
 
   if (display_setting_version != display_setting_version_) {
+    if (profile) profile->add(FrameCounter::DisplayChanges);
     display_setting_version_ = display_setting_version;
     pso_valid.clear();
   }
@@ -78,10 +84,22 @@ Presenter::synchronizeLayerProperties() {
                       : has_hdr_metadata_          ? &hdr_metadata_
                                                    : nullptr;
   if (unlikely(!pso_valid.test_and_set())) {
+    const auto wait_start = profile ? profile_clock::now() : profile_clock::time_point{};
     frame_presented_.wait(frame_requested_);
+    const auto build_start = profile ? profile_clock::now() : profile_clock::time_point{};
     buildRenderPipelineState(final_colorspace == WMTColorSpaceHDR_PQ, is_hdr && hdr_metadata != nullptr);
+    const auto update_start = profile ? profile_clock::now() : profile_clock::time_point{};
     layer_.setProps(layer_props_);
     layer_.setColorSpace(final_colorspace);
+    if (profile) {
+      profile->add(FrameCounter::LayerWaitNS,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(build_start - wait_start).count());
+      profile->add(FrameCounter::PresentPipelineBuildNS,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(update_start - build_start).count());
+      profile->add(FrameCounter::LayerUpdateNS,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(profile_clock::now() - update_start).count());
+      profile->add(FrameCounter::PresentPipelineBuilds, 2);
+    }
   }
 
   DXMTPresentMetadata metadata;
@@ -110,9 +128,14 @@ Presenter::synchronizeLayerProperties() {
 
 WMT::MetalDrawable
 Presenter::encodeCommands(
-    WMT::CommandBuffer cmdbuf, WMT::Fence fence, WMT::Texture backbuffer, DXMTPresentMetadata metadata
+    WMT::CommandBuffer cmdbuf, WMT::Fence fence, WMT::Texture backbuffer, DXMTPresentMetadata metadata,
+    uint64_t *next_drawable_ns
 ) {
+  using profile_clock = std::chrono::steady_clock;
+  const auto start = next_drawable_ns ? profile_clock::now() : profile_clock::time_point{};
   auto drawable = layer_.nextDrawable();
+  if (next_drawable_ns)
+    *next_drawable_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(profile_clock::now() - start).count();
 
   WMTRenderPassInfo info;
   WMT::InitializeRenderPassInfo(info);

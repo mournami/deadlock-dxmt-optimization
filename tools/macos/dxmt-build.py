@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.request
@@ -19,7 +20,7 @@ LAB = Path(os.environ.get("DXMT_LAB_DIR", str(REPO_ROOT / ".dxmt-lab"))).expandu
 SOURCE = REPO_ROOT
 TOOLS = LAB / "build-tools/bin"
 CHAIN = SOURCE / "toolchains"
-XCODE = Path("/Applications/Xcode.app/Contents/Developer")
+XCODE = Path(os.environ.get("DXMT_DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer"))
 CLT = Path("/Library/Developer/CommandLineTools")
 ASSETS = (
     ("wine", "https://github.com/3Shain/wine/releases/download/v8.16-3shain/wine.tar.gz", 230434672),
@@ -137,6 +138,7 @@ def build(variant: str, jobs: int) -> None:
         # formatting and aggregation in the baseline so those are the only
         # performance differences being tested.
         for relative in ("src/dxmt/dxmt_frame_report.hpp", "src/dxmt/dxmt_command_queue.cpp",
+                         "src/dxmt/dxmt_presenter.cpp", "src/dxmt/dxmt_presenter.hpp", "src/dxmt/dxmt_context.cpp",
                          "src/airconv/shaders/air_tessellation.metal"):
             shutil.copy2(SOURCE / relative, source / relative)
         shutil.copytree(SOURCE / "include/native/directx", source / "include/native/directx",
@@ -148,13 +150,26 @@ def build(variant: str, jobs: int) -> None:
         guard = "#ifdef DXMT_DEBUG\n    // Aggregates are only consumed by the debug HUD, not the frame report.\n    statistics.compute(frame_count);\n#endif"
         if queue.count(guard) != 1:
             raise RuntimeError("Baseline instrumentation needs review after source changes")
-        original_queue = subprocess.check_output(["git", "show", pin["commit"] + ":src/dxmt/dxmt_command_queue.hpp"], cwd=SOURCE, text=True)
-        original_queue = original_queue.replace('#include "dxmt_context.hpp"', '#include "dxmt_context.hpp"\n#include "dxmt_frame_report.hpp"')
-        original_queue = original_queue.replace('  CaptureState capture_state;', '  CaptureState capture_state;\n  std::unique_ptr<FrameReport<dxmt::thread>> frame_report_;')
-        start, end = "  void\n  PresentBoundary()", "  uint32_t GetMaxLatency()"
-        boundary = queue[queue.index(start):queue.index(end)].replace(guard, "    statistics.compute(frame_count);")
-        original_queue = original_queue[:original_queue.index(start)] + boundary + original_queue[original_queue.index(end):]
-        (source / "src/dxmt/dxmt_command_queue.hpp").write_text(original_queue)
+        queue = queue.replace(guard, "    statistics.compute(frame_count);")
+        start, end = "  void\n  encode(", "  void\n  reset()"
+        encode = queue[queue.index(start):queue.index(end)]
+        if encode.count("#ifdef DXMT_DEBUG") != 3:
+            raise RuntimeError("Baseline encoding timer restoration needs review")
+        encode = encode.replace("#ifdef DXMT_DEBUG\n", "").replace("#endif\n", "")
+        queue = queue[:queue.index(start)] + encode + queue[queue.index(end):]
+        (source / "src/dxmt/dxmt_command_queue.hpp").write_text(queue)
+        # Both variants collect the same state counters. Only experiment skips
+        # redundant bindings by default; DXMT_OM_STATE_DEDUP can override either.
+        context = (SOURCE / "src/d3d11/d3d11_context_impl.cpp").read_text()
+        default = 'env::getEnvVar("DXMT_OM_STATE_DEDUP") != "0"'
+        if context.count(default) != 1:
+            raise RuntimeError("Baseline state optimization toggle needs review")
+        (source / "src/d3d11/d3d11_context_impl.cpp").write_text(context.replace(default, 'env::getEnvVar("DXMT_OM_STATE_DEDUP") == "1"'))
+        swapchain = subprocess.check_output(["git", "show", pin["commit"] + ":src/d3d11/d3d11_swapchain.cpp"], cwd=SOURCE, text=True)
+        if swapchain.count("presenter->synchronizeLayerProperties()") != 2:
+            raise RuntimeError("Baseline presentation instrumentation needs review")
+        (source / "src/d3d11/d3d11_swapchain.cpp").write_text(swapchain.replace(
+            "presenter->synchronizeLayerProperties()", "presenter->synchronizeLayerProperties(cmd_queue.FrameProfiler())"))
     compiler = CHAIN / "llvm-mingw-20231017-ucrt-macos-universal/bin"
     cross = LAB / f"cross-win64-{variant}.ini"
     binaries = {"c": "gcc", "cpp": "g++", "ar": "ar", "strip": "strip", "windres": "windres"}
@@ -181,19 +196,22 @@ def build(variant: str, jobs: int) -> None:
     # Only record a completed build after install succeeds.
     (LAB / f"build-{variant}-manifest.json").write_text(json.dumps({
         "variant": variant, "source_commit": current, "upstream_baseline_commit": pin["commit"], "install": str(install),
+        "source_tree_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=SOURCE, text=True)),
         "dependency_manifest": str(LAB / "dependency-manifest.json"),
         "directx_headers_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE / "include/native/directx", text=True).strip(),
         "source_files_sha256": {
             relative: hashlib.sha256((source / relative).read_bytes()).hexdigest()
             for relative in ("src/dxmt/dxmt_frame_report.hpp", "src/dxmt/dxmt_command_queue.cpp",
                              "src/dxmt/dxmt_command_queue.hpp", "src/d3d11/d3d11_swapchain.cpp",
-                             "src/airconv/shaders/air_tessellation.metal")
+                             "src/airconv/shaders/air_tessellation.metal", "src/d3d11/d3d11_context_impl.cpp",
+                             "src/dxmt/dxmt_presenter.cpp", "src/dxmt/dxmt_presenter.hpp", "src/dxmt/dxmt_context.cpp")
         },
         "baseline_includes_identical_recorder": True,
         "binary_sha256": {relative: hashlib.sha256((install / relative).read_bytes()).hexdigest()
                           for relative in ("x86_64-windows/d3d11.dll", "x86_64-windows/dxgi.dll",
                                            "x86_64-windows/winemetal.dll", "x86_64-unix/winemetal.so")},
         "runtime_tested": False,
+        "om_state_dedup_default": variant == "experiment",
     }, indent=2) + "\n")
 
 
@@ -202,12 +220,16 @@ def main() -> None:
     parser.add_argument("command", choices=("dependencies", "llvm", "build"))
     parser.add_argument("--variant", choices=("baseline", "experiment"), default="experiment")
     parser.add_argument("--jobs", type=int, default=3)
+    parser.add_argument("--publish", action="store_true", help="Run private DLL/GPU checks and update the CrossOver ready pointer")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 6:
         parser.error("Use 1 to 6 build jobs on this 16 GB Mac")
     if args.command == "dependencies": dependencies()
     elif args.command == "llvm": llvm(args.jobs)
-    else: build(args.variant, args.jobs)
+    else:
+        build(args.variant, args.jobs)
+        if args.publish:
+            run([sys.executable, str(Path(__file__).with_name("dxmt-crossover.py")), "publish", "--variant", args.variant], env=os.environ.copy())
 
 
 if __name__ == "__main__":

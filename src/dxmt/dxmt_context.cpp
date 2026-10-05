@@ -845,9 +845,15 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
     case EncoderType::Present: {
       auto data = static_cast<PresentData *>(current);
       auto t0 = clock::now();
-      auto drawable = data->presenter->encodeCommands(cmdbuf, {}, data->backbuffer, data->metadata);
+      uint64_t next_drawable_ns = 0;
+      const bool profiling = queue().FrameReportEnabled();
+      auto drawable = data->presenter->encodeCommands(cmdbuf, {}, data->backbuffer, data->metadata,
+                                                    profiling ? &next_drawable_ns : nullptr);
       auto t1 = clock::now();
       currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
+      if (profiling)
+        queue().ReportEncoder({currentFrameId(), next_drawable_ns,
+            uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count())});
       if (data->after > 0)
         cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
       else

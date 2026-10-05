@@ -80,7 +80,29 @@ def stop() -> None:
     lab.stop_bottle(TEST_BOTTLE)
 
 
-def run(variant: str) -> None:
+def selected_build(variant: str, require_ready: bool = False) -> Path:
+    ready = lab.LAB / ("ready-" + variant + ".json")
+    if not ready.is_file():
+        if require_ready:
+            raise RuntimeError("No validated build is ready for " + variant)
+        return lab.LAB / ("install-" + variant)
+    record = json.loads(ready.read_text())
+    source = Path(record["install"]).resolve()
+    if not source.is_relative_to(lab.LAB.resolve()) or record.get("variant") != variant:
+        raise RuntimeError("The ready build escapes the lab or has a wrong variant")
+    if record.get("validation") != "dll-and-gpu-readback":
+        raise RuntimeError("The ready build has not passed validation")
+    if set(record["sha256"]) != set(lab.FILES):
+        raise RuntimeError("The ready build is incomplete")
+    if any(not (source / rel).resolve().is_relative_to(source) for rel in lab.FILES):
+        raise RuntimeError("The ready component escapes its snapshot")
+    if any(not (source / rel).is_file() or lab.digest(source / rel) != value
+           for rel, value in record["sha256"].items()):
+        raise RuntimeError("The ready build changed after validation")
+    return source
+
+
+def run(variant: str, require_ready: bool = False) -> None:
     # Hold the common lock through the launcher lifetime. `stop` intentionally
     # does not take it, so the user can end their own private test.
     with lab.operation_lock():
@@ -95,7 +117,7 @@ def run(variant: str) -> None:
         # Closing a Terminal can kill the launcher while leaving Wine services.
         # With no server, stop() reaps only verified orphan services, never apps.
         stop()
-        lab.stage(lab.LAB / ("install-" + variant))
+        lab.stage(selected_build(variant, require_ready))
         # Loading must succeed before opening Steam. This is still not a
         # device/rendering test, but catches broken paired libraries early.
         lab.probe()
@@ -106,9 +128,12 @@ def run(variant: str) -> None:
         if (PREFIX / "dosdevices/z:").resolve() != Path("/"):
             raise RuntimeError("The test bottle has no Z: mapping to the Mac filesystem")
         wine_report = "Z:" + str(report_dir)
-        configure(PREFIX / "cxbottle.conf", {"EnvironmentVariables": {"DXMT_FRAME_REPORT_DIR": wine_report}})
+        dedup = "1" if variant == "experiment" else "0"
+        configure(PREFIX / "cxbottle.conf", {"EnvironmentVariables": {
+            "DXMT_FRAME_REPORT_DIR": wine_report, "DXMT_OM_STATE_DEDUP": dedup}})
         env = lab.environment()
         env["DXMT_FRAME_REPORT_DIR"] = wine_report
+        env["DXMT_OM_STATE_DEDUP"] = dedup
         env["MTL_HUD_ENABLED"] = "1"
         env["WINEDEBUG"] = "-all"
         print("Starting private Windows Steam / Deadlock (DX11).", flush=True)

@@ -19,7 +19,8 @@ import tempfile
 import time
 
 
-LAB = Path(__file__).resolve().parents[1] / "work" / "dxmt-deadlock-lab"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LAB = Path(os.environ.get("DXMT_LAB_DIR", str(REPO_ROOT / ".dxmt-lab"))).expanduser().resolve()
 RUNTIME = LAB / "runtime"
 ORIGINAL = Path("/Applications/CrossOver.app/Contents/SharedSupport/CrossOver")
 BOTTLES = LAB / "bottles"
@@ -634,19 +635,21 @@ def probe() -> None:
             lock.unlink(missing_ok=True)
 
 
-def device_probe() -> None:
+def device_probe(executable_name: str = "device-probe.exe", success_marker: str = "gpu_readback") -> None:
     private_runtime()
     assert_probe_stopped()
     prefix = private_prefix(BOTTLE)
     expected = staged_hashes()
     route_runtime_dxmt()
     configure_dxmt(BOTTLE)
-    executable = LAB / "device-probe.exe"
+    if executable_name not in ("device-probe.exe", "om-state-probe.exe"):
+        raise RuntimeError("Only the private GPU probes are allowed")
+    executable = LAB / executable_name
     if not executable.is_file() or not executable.resolve().is_relative_to(LAB.resolve()):
         raise RuntimeError("The local device-probe.exe is missing.")
     if (prefix / "dosdevices/z:").resolve() != Path("/"):
         raise RuntimeError("The private probe bottle has no Z: mapping to the Mac filesystem.")
-    log = LAB / "probe-logs/device.log"
+    log = LAB / ("probe-logs/device.log" if executable_name == "device-probe.exe" else "probe-logs/om-state.log")
     log.parent.mkdir(exist_ok=True)
     try:
         result = subprocess.run([
@@ -657,13 +660,13 @@ def device_probe() -> None:
         output = result.stdout + result.stderr
         log.write_text(output)
         paths = verify_loaded_dxmt(output, prefix, ("d3d11.dll", "dxgi.dll", "winemetal.dll"))
-        if result.returncode or "device_created" not in output or "gpu_readback" not in output:
+        if result.returncode or "device_created" not in output or success_marker not in output:
             raise RuntimeError(f"D3D11/Metal device/readback failed ({result.returncode}); inspect {log}")
         if staged_hashes() != expected:
             raise RuntimeError("Selected DXMT changed during the GPU probe.")
         print(json.dumps({"device_created": True, "gpu_readback_passed": True,
                           "loaded_paths": paths, "exit_code": result.returncode,
-                          "log": str(log)}, ensure_ascii=False), flush=True)
+                          "test": executable_name, "log": str(log)}, ensure_ascii=False), flush=True)
     finally:
         stop_bottle(BOTTLE)
 

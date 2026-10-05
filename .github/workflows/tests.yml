@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check lab and reporting tools
-        run: python3 -m unittest discover -s tests -p 'test_tools.py' -v
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Check reporter queue and CSV with sanitizers
         run: |
           mkdir -p "$RUNNER_TEMP/frame-report-output"

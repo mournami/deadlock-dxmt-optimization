@@ -1,6 +1,7 @@
 #pragma once
 #include "Metal.hpp"
 #include "dxmt_command.hpp"
+#include "dxmt_frame_report.hpp"
 #include "rc/util_rc.hpp"
 #include "util_cpu_fence.hpp"
 #include "winemetal.h"
@@ -48,10 +49,11 @@ public:
     };
   };
 
-  PresentState synchronizeLayerProperties();
+  PresentState synchronizeLayerProperties(FrameCounters *profile = nullptr);
 
   WMT::MetalDrawable
-  encodeCommands(WMT::CommandBuffer cmdbuf, WMT::Fence fence, WMT::Texture backbuffer, DXMTPresentMetadata metadata);
+  encodeCommands(WMT::CommandBuffer cmdbuf, WMT::Fence fence, WMT::Texture backbuffer, DXMTPresentMetadata metadata,
+                 uint64_t *next_drawable_ns = nullptr);
 
 private:
   void buildRenderPipelineState(bool is_pq, bool with_hdr_metadata);

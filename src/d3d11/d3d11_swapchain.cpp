@@ -604,7 +604,7 @@ public:
         this, vsync_duration, backbuffer = backbuffer_->texture(),
         sync_state = SyncFrame(chunk->signal_frame_latency_fence_),
         upscaled = upscaled_backbuffer_->texture(),
-        scaler = this->metalfx_scaler, state = presenter->synchronizeLayerProperties()
+        scaler = this->metalfx_scaler, state = presenter->synchronizeLayerProperties(cmd_queue.FrameProfiler())
       ](ArgumentEncodingContext &ctx) mutable {
         auto &scaler_info = ctx.currentFrameStatistics().last_scaler_info;
         scaler_info.type = ScalerType::Spatial;
@@ -619,7 +619,7 @@ public:
       });
     } else {
       chunk->emitcc([
-        this, vsync_duration, state = presenter->synchronizeLayerProperties(),
+        this, vsync_duration, state = presenter->synchronizeLayerProperties(cmd_queue.FrameProfiler()),
         sync_state = SyncFrame(chunk->signal_frame_latency_fence_),
         backbuffer = backbuffer_->texture()
       ](ArgumentEncodingContext &ctx) mutable {

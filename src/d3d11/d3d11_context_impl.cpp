@@ -27,6 +27,7 @@ since it is for internal use only
 #include "util_flags.hpp"
 #include "util_math.hpp"
 #include "util_win32_compat.h"
+#include "util_env.hpp"
 
 namespace dxmt {
 
@@ -2636,6 +2637,17 @@ public:
         should_invalidate_pipeline = true;
       }
     }
+    const float default_factor[4] = {1, 1, 1, 1};
+    const bool same_factor = memcmp(state_.OutputMerger.BlendFactor,
+        BlendFactor ? BlendFactor : default_factor, sizeof(float[4])) == 0;
+    const bool redundant = !should_invalidate_pipeline && same_factor && state_.OutputMerger.SampleMask == SampleMask;
+    ctx_state.cmd_queue.RecordFrameCounter(FrameCounter::OMBlendCalls);
+    if (redundant) {
+      ctx_state.cmd_queue.RecordFrameCounter(FrameCounter::OMBlendRedundant);
+      // Do not clear existing dirty bits: encoder/command-list resets must
+      // still rebind this state even when the application repeats its values.
+      if (deduplicate_om_state_) return;
+    }
     if (BlendFactor) {
       memcpy(state_.OutputMerger.BlendFactor, BlendFactor, sizeof(float[4]));
     } else {
@@ -2678,7 +2690,15 @@ public:
   OMSetDepthStencilState(ID3D11DepthStencilState *pDepthStencilState, UINT StencilRef) override {
     std::lock_guard<mutex_t> lock(mutex);
 
-    if (auto expected = com_cast<IMTLD3D11DepthStencilState>(pDepthStencilState)) {
+    auto expected = com_cast<IMTLD3D11DepthStencilState>(pDepthStencilState);
+    const bool redundant = expected.ptr() == state_.OutputMerger.DepthStencilState &&
+                           state_.OutputMerger.StencilRef == StencilRef;
+    ctx_state.cmd_queue.RecordFrameCounter(FrameCounter::OMDepthCalls);
+    if (redundant) {
+      ctx_state.cmd_queue.RecordFrameCounter(FrameCounter::OMDepthRedundant);
+      if (deduplicate_om_state_) return;
+    }
+    if (expected) {
       state_.OutputMerger.DepthStencilState = expected.ptr();
     } else {
       state_.OutputMerger.DepthStencilState = nullptr;
@@ -4518,6 +4538,7 @@ public:
     UpdateVertexBuffer();
     UpdateSOTargets();
     if (dirty_state.any(DirtyState::DepthStencilState)) {
+      ctx_state.cmd_queue.RecordFrameCounter(FrameCounter::OMDepthCommands);
       IMTLD3D11DepthStencilState *state =
           state_.OutputMerger.DepthStencilState ? state_.OutputMerger.DepthStencilState : default_depth_stencil_state;
       EmitST([state, stencil_ref = state_.OutputMerger.StencilRef](ArgumentEncodingContext& enc) {
@@ -4538,6 +4559,7 @@ public:
       });
     }
     if (dirty_state.any(DirtyState::BlendFactorAndStencilRef)) {
+      ctx_state.cmd_queue.RecordFrameCounter(FrameCounter::OMBlendCommands);
       EmitST([r = state_.OutputMerger.BlendFactor[0], g = state_.OutputMerger.BlendFactor[1],
             b = state_.OutputMerger.BlendFactor[2], a = state_.OutputMerger.BlendFactor[3],
             stencil_ref = state_.OutputMerger.StencilRef](ArgumentEncodingContext &enc) {
@@ -4836,6 +4858,7 @@ protected:
   D3D11UserDefinedAnnotation annotation_;
   MTLD3D11ContextExt<ContextInternalState> ext_;
   uint64_t max_object_threadgroups_;
+  const bool deduplicate_om_state_ = env::getEnvVar("DXMT_OM_STATE_DEDUP") != "0";
 
 public:
   MTLD3D11DeviceContextImplBase(MTLD3D11Device *pDevice, ContextInternalState &ctx_state, ContextInternalState::device_mutex_t &mutex) :

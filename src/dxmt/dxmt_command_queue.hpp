@@ -180,6 +180,7 @@ private:
   RingBumpState<HostBufferBlockAllocator, 0x1000 /* 4kB */> reftracker_storage_allocator;
   CaptureState capture_state;
   std::unique_ptr<FrameReport<dxmt::thread>> frame_report_;
+  FrameCounters frame_counters_;
 
 public:
   InternalCommandLibrary cmd_library;
@@ -244,6 +245,17 @@ public:
     return statistics.at(frame_count);
   }
 
+  bool FrameReportEnabled() const { return frame_report_ != nullptr; }
+  FrameCounters *FrameProfiler() { return frame_report_ ? &frame_counters_ : nullptr; }
+
+  void RecordFrameCounter(FrameCounter counter, uint64_t value = 1) {
+    if (unlikely(frame_report_ != nullptr)) frame_counters_.add(counter, value);
+  }
+
+  void ReportEncoder(EncoderReportSample sample) {
+    if (frame_report_) frame_report_->submitEncoder(sample);
+  }
+
   void
   PresentBoundary() {
     FrameReportSample sample;
@@ -253,6 +265,7 @@ public:
       sample.command_buffers = frame.command_buffer_count;
       sample.resource_syncs = frame.sync_count;
       sample.event_stalls = frame.event_stall;
+      sample.cpu = frame_counters_.take();
       sample.command_queue_wait_ns =
           std::chrono::duration_cast<std::chrono::nanoseconds>(frame.commit_interval).count();
       sample.resource_sync_wait_ns =

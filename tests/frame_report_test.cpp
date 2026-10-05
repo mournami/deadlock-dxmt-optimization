@@ -44,6 +44,7 @@ int main(int argc, char **argv) {
     sample.resource_sync_wait_ns = 100000;
     sample.frame_latency_wait_ns = 200000;
     sample.frame = 0;
+    sample.cpu[size_t(FrameCounter::OMBlendCalls)] = 7;
     report.submit(sample);
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
     sample.frame = 1;
@@ -58,7 +59,7 @@ int main(int argc, char **argv) {
   std::getline(file, second);
   std::getline(file, footer);
   assert(header.starts_with("frame,boundary_interval_ns,"));
-  assert(first == "0,0,500000,100000,200000,4,0,0");
+  assert(first == "0,0,500000,100000,200000,4,0,0,7,0,0,0,0,0,0,0,0,0,0,0");
   assert(second.starts_with("1,"));
   assert(std::stoull(second.substr(2)) >= 1000000);
   assert(footer == "# dropped_samples=0");
@@ -73,11 +74,16 @@ int main(int argc, char **argv) {
   const auto stress = root / "frame-report-stress.csv";
   {
     FrameReport<> report(stress);
+    std::thread encoder([&]() {
+      for (uint64_t i = 0; i < 100000; ++i)
+        report.submitEncoder({i, i + 10, i + 20});
+    });
     for (uint64_t i = 0; i < 100000; ++i) {
       FrameReportSample sample;
       sample.frame = i;
       report.submit(sample);
     }
+    encoder.join();
   }
   std::ifstream stress_file(stress);
   std::string line;
@@ -93,5 +99,27 @@ int main(int argc, char **argv) {
     }
   }
   assert(rows + dropped == 100000);
-  std::cout << "queue ordering, CSV drain, disabled output, overflow: passed\n";
+  std::ifstream encoder_file(root / "frame-report-stress.encoder.csv");
+  previous = rows = dropped = 0;
+  while (std::getline(encoder_file, line)) {
+    if (line.starts_with("# dropped_samples=")) dropped = std::stoull(line.substr(18));
+    else if (!line.starts_with("frame,")) {
+      const auto frame = std::stoull(line);
+      if (rows) assert(frame > previous);
+      assert(line == std::to_string(frame) + "," + std::to_string(frame + 10) + "," + std::to_string(frame + 20));
+      previous = frame;
+      ++rows;
+    }
+  }
+  assert(rows + dropped == 100000);
+
+  FrameCounters counters;
+  std::thread a([&]() { for (size_t i = 0; i < 100000; ++i) counters.add(FrameCounter::OMBlendCalls); });
+  std::thread b([&]() { for (size_t i = 0; i < 100000; ++i) counters.add(FrameCounter::OMBlendCalls); });
+  uint64_t total = 0;
+  for (size_t i = 0; i < 1000; ++i) total += counters.take()[size_t(FrameCounter::OMBlendCalls)];
+  a.join(); b.join();
+  total += counters.take()[size_t(FrameCounter::OMBlendCalls)];
+  assert(total == 200000);
+  std::cout << "independent CPU/encoder queues, CSV drain, overflow, concurrent counters: passed\n";
 }
