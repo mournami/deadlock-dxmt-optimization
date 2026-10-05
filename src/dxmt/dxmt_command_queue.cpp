@@ -50,6 +50,24 @@ CommandQueue::CommandQueue(WMT::Device device) :
     } catch (const std::invalid_argument &) {
     }
   }
+
+  const auto report_dir = env::getEnvVar("DXMT_FRAME_REPORT_DIR");
+  if (!report_dir.empty()) {
+    static std::atomic<uint64_t> next_report{0};
+    const auto file = env::getExeBaseName() + "_" + std::to_string(GetCurrentProcessId()) + "_" +
+                      std::to_string(next_report.fetch_add(1, std::memory_order_relaxed)) + ".csv";
+    try {
+      auto reporter = std::make_unique<FrameReport<dxmt::thread>>(
+          std::filesystem::path(str::topath(report_dir.c_str())) / file
+      );
+      if (reporter->enabled())
+        frame_report_ = std::move(reporter);
+      else
+        WARN("DXMT frame report could not be opened in ", report_dir);
+    } catch (const std::exception &error) {
+      WARN("DXMT frame report disabled: ", error.what());
+    }
+  }
 }
 
 CommandQueue::~CommandQueue() {

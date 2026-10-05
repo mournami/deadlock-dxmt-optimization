@@ -6,6 +6,7 @@
 #include "dxmt_command.hpp"
 #include "dxmt_command_list.hpp"
 #include "dxmt_context.hpp"
+#include "dxmt_frame_report.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_resource_initializer.hpp"
 #include "dxmt_ring_bump_allocator.hpp"
@@ -172,6 +173,7 @@ private:
   RingBumpState<HostBufferBlockAllocator, kCommandChunkCPUHeapSize, dxmt::null_mutex> cpu_command_allocator;
   RingBumpState<HostBufferBlockAllocator, 0x1000 /* 4kB */> reftracker_storage_allocator;
   CaptureState capture_state;
+  std::unique_ptr<FrameReport<dxmt::thread>> frame_report_;
 
 public:
   InternalCommandLibrary cmd_library;
@@ -238,6 +240,18 @@ public:
 
   void
   PresentBoundary() {
+    FrameReportSample sample;
+    if (frame_report_) {
+      const auto &frame = CurrentFrameStatistics();
+      sample.frame = frame_count;
+      sample.command_buffers = frame.command_buffer_count;
+      sample.resource_syncs = frame.sync_count;
+      sample.event_stalls = frame.event_stall;
+      sample.command_queue_wait_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(frame.commit_interval).count();
+      sample.resource_sync_wait_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(frame.sync_interval).count();
+    }
     statistics.compute(frame_count);
     frame_count++;
     statistics.at(frame_count).reset();
@@ -247,8 +261,12 @@ public:
       frame_latency_fence_.wait(frame_count - max_latency_);
       auto t1 = clock::now();
       statistics.at(frame_count).present_lantency_interval += (t1 - t0);
+      sample.frame_latency_wait_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     }
     statistics.at(frame_count).latency = max_latency_;
+    if (frame_report_)
+      frame_report_->submit(sample);
   }
 
   uint32_t GetMaxLatency() { return max_latency_; }
